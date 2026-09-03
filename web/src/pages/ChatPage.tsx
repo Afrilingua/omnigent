@@ -1,5 +1,4 @@
 import {
-  type DragEvent,
   type FormEvent,
   type KeyboardEvent,
   createContext,
@@ -161,6 +160,7 @@ import {
 import { useMarkConversationSeen } from "@/hooks/useUnseenConversations";
 import { useUserMessageNav } from "@/hooks/useUserMessageNav";
 import { useWorkingLabelTick } from "@/hooks/useWorkingLabelTick";
+import { useFileDropTarget } from "@/hooks/useFileDropTarget";
 import { UserMessageNav } from "@/components/UserMessageNav";
 import { HostBadge } from "@/components/HostBadge";
 import {
@@ -170,6 +170,7 @@ import {
   SlashCommandMenu,
 } from "@/components/SlashCommandMenu";
 import { FileMentionMenu } from "@/components/FileMentionMenu";
+import { FileDropOverlay } from "@/components/FileDropOverlay";
 import {
   useWorkspaceAllFiles,
   useWorkspaceDirectory,
@@ -1471,9 +1472,12 @@ interface SessionLayoutProps {
 function SessionLayout({ mainAgent }: SessionLayoutProps) {
   return (
     <div className="flex min-h-0 flex-1 overflow-hidden">
-      {/* `relative`: positions MainAgentSurface's persistent terminal
-          overlay (absolute inset-0) against the main column. */}
-      <div className="relative flex min-w-0 flex-1 flex-col">{mainAgent}</div>
+      {/* `relative`: positions MainAgentSurface's persistent terminal overlay
+          and the composer's file-drop overlay (both absolute inset-0) against
+          the main column. */}
+      <div data-chat-surface className="relative flex min-w-0 flex-1 flex-col">
+        {mainAgent}
+      </div>
     </div>
   );
 }
@@ -4942,8 +4946,6 @@ export function Composer({
   // "recall replaced the value" (keep cursor).
   const recallingRef = useRef(false);
 
-  const [isDragActive, setIsDragActive] = useState(false);
-
   const addFiles = (incoming: File[]) => {
     // Reject unsupported types (only images, PDF, and text/code) and
     // oversized files up front — before the upload — with a friendly
@@ -4959,33 +4961,14 @@ export function Composer({
     setAttachmentError(errors.length > 0 ? errors.join("\n") : null);
   };
 
-  const handleDrop = (e: DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragActive(false);
-    const dropped = Array.from(e.dataTransfer.files);
-    if (dropped.length > 0) addFiles(dropped);
-  };
-
-  const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragActive(true);
-  };
-
-  const handleDragEnter = (e: DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragActive(true);
-  };
-
-  const handleDragLeave = (e: DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    // Only clear the active state when the pointer leaves the container
-    // itself, not when it moves between child elements inside it.
-    if (e.currentTarget.contains(e.relatedTarget as Node)) return;
-    setIsDragActive(false);
-  };
+  // Files dropped anywhere in the chat column attach here, not just on the
+  // composer box. Scoped to the column so the sidebar and workspace rail keep
+  // their own drag behavior; with no such ancestor the card is the target.
+  const [dropTarget, setDropTarget] = useState<HTMLElement | null>(null);
+  const bindComposerCard = useCallback((el: HTMLDivElement | null) => {
+    setDropTarget(el?.closest<HTMLElement>("[data-chat-surface]") ?? el);
+  }, []);
+  const isDragActive = useFileDropTarget(dropTarget, addFiles);
 
   const removeFile = (index: number) => {
     setFiles((prev) => prev.filter((_, i) => i !== index));
@@ -5303,10 +5286,13 @@ export function Composer({
           Truthy (not just non-null) so an empty label never peeks a
           nameless tray. */}
       {subAgentLabel ? <SubagentComposerTray label={subAgentLabel} /> : null}
+      {/* Drop cue, spanning the chat column this composer belongs to. */}
+      {isDragActive && dropTarget ? <FileDropOverlay container={dropTarget} /> : null}
       {/* Single rounded container — textarea + action row. No focus-within
           ring; drag-over still lifts an inset ring. dark:bg-card-solid so
           upper trays (queued / sub-agent) don't ghost through glass --card. */}
       <div
+        ref={bindComposerCard}
         // Opaque card edge for transcript clearance; status shelf below is translucent.
         data-composer-card
         className={cn(
@@ -5314,16 +5300,7 @@ export function Composer({
           CHAT_COLUMN_WIDTH,
           isDragActive && "ring-2 ring-ring ring-inset",
         )}
-        onDrop={handleDrop}
-        onDragOver={handleDragOver}
-        onDragEnter={handleDragEnter}
-        onDragLeave={handleDragLeave}
       >
-        {isDragActive && (
-          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-2xl bg-card/80">
-            <span className="text-ui font-medium text-ring">Drop files here</span>
-          </div>
-        )}
         {/* Slash-command suggestions — floats above the composer box */}
         {menuOpen && (
           <SlashCommandMenu
