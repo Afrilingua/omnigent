@@ -4931,6 +4931,15 @@ async def _forward_event_to_runner(
         # servers — False/absent saves the runner from a no-op spec
         # load on every turn for agents without MCP servers.
         "has_mcp_servers": has_mcp_servers,
+        # Whether a live renderer (e.g. the desktop app's embedded
+        # browser) is subscribed to this session's stream right now.
+        # The runner drops the ``browser_*`` tool schemas for the turn
+        # when this is False — a headless session must not advertise
+        # tools that can never be served. Presence heuristic: any stream
+        # subscriber counts (the protocol has no renderer-capability
+        # registration), so a non-renderer viewer keeps tools advertised
+        # — no worse than the pre-hint behavior.
+        "browser_renderer_available": session_stream.has_subscribers(session_id),
         # Id of the item just persisted for this turn. On a cold runner
         # cache the runner reloads history (which includes this item in
         # PRE-resolution form) and drops it by id, appending its own
