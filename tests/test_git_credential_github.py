@@ -6,9 +6,17 @@ import io
 import sys
 
 import pytest
+import yaml
 
 import omnigent.git_credential_github as h
 from omnigent.host.identity import HOST_TOKEN_ENV_VAR
+
+
+@pytest.fixture(autouse=True)
+def _force_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The broker host integrations are sandbox-only; default every test to the
+    # in-sandbox path. The not-in-sandbox no-op test clears IS_SANDBOX explicitly.
+    monkeypatch.setenv("IS_SANDBOX", "1")
 
 
 def test_get_prints_credentials_for_github(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -104,22 +112,6 @@ def test_configure_host_git_clears_stale_broker_when_not_connected(
     flat = [" ".join(c) for c in calls]
     assert not any("--add" in c for c in flat)
     assert not any("user.email" in c for c in flat)
-
-
-def test_resolve_github_token_returns_token_when_connected(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        h,
-        "_fetch",
-        lambda *a, **k: {"connected": True, "token": "ghu_x", "username": "x-access-token"},
-    )
-    assert h.resolve_github_token("http://srv", "host1", "tok") == "ghu_x"
-
-
-def test_resolve_github_token_none_when_not_connected(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(h, "_fetch", lambda *a, **k: {"connected": False})
-    assert h.resolve_github_token("http://srv", "host1", "tok") is None
 
 
 def test_credential_url_targets_the_generic_provider_path() -> None:
@@ -222,11 +214,38 @@ def test_configure_host_gh_writes_hosts_yml(monkeypatch: pytest.MonkeyPatch, tmp
         lambda *a, **k: {"connected": True, "token": "gho_user", "login": "octo"},
     )
     assert h.configure_host_gh("http://srv", "host1") is True
-    hosts = (tmp_path / "gh" / "hosts.yml").read_text()
-    assert "github.com:" in hosts
-    assert 'oauth_token: "gho_user"' in hosts
-    assert 'user: "octo"' in hosts
-    assert "git_protocol: https" in hosts
+    hosts_path = tmp_path / "gh" / "hosts.yml"
+    written = yaml.safe_load(hosts_path.read_text())
+    assert written["github.com"] == {
+        "oauth_token": "gho_user",
+        "user": "octo",
+        "git_protocol": "https",
+    }
+    # The credential file is owner-only (0600) — never a world-readable window.
+    assert (hosts_path.stat().st_mode & 0o777) == 0o600
+
+
+def test_configure_host_gh_preserves_other_hosts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    # Merge, don't truncate: an existing GitHub Enterprise entry (or a second
+    # account) must survive — hosts.yml is a multi-host map, and the host's
+    # GH_CONFIG_DIR can resolve to the developer's real ~/.config/gh.
+    gh_dir = tmp_path / "gh"
+    gh_dir.mkdir()
+    (gh_dir / "hosts.yml").write_text(
+        "github.mycompany.com:\n    oauth_token: enterprise-tok\n    user: alice\n"
+    )
+    monkeypatch.setenv(HOST_TOKEN_ENV_VAR, "launch-tok")
+    monkeypatch.setenv("GH_CONFIG_DIR", str(gh_dir))
+    monkeypatch.setattr(
+        h, "_fetch", lambda *a, **k: {"connected": True, "token": "gho_user", "login": "octo"}
+    )
+    assert h.configure_host_gh("http://srv", "host1") is True
+    written = yaml.safe_load((gh_dir / "hosts.yml").read_text())
+    # The enterprise host survives; github.com is added.
+    assert written["github.mycompany.com"]["oauth_token"] == "enterprise-tok"
+    assert written["github.com"]["oauth_token"] == "gho_user"
 
 
 def test_configure_host_gh_noop_when_not_connected(
@@ -245,6 +264,27 @@ def test_configure_host_gh_noop_without_token(monkeypatch: pytest.MonkeyPatch, t
     monkeypatch.setenv("GH_CONFIG_DIR", str(tmp_path / "gh"))
     assert h.configure_host_gh("http://srv", "host1") is False
     assert not (tmp_path / "gh" / "hosts.yml").exists()
+
+
+def test_host_integrations_are_noops_outside_sandbox(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    # NOT in a managed sandbox → every auto-apply is a complete no-op even for a
+    # connected owner, so a local `omnigent host` never touches the developer's
+    # real ~/.gitconfig or ~/.config/gh.
+    monkeypatch.delenv("IS_SANDBOX", raising=False)
+    monkeypatch.setenv(HOST_TOKEN_ENV_VAR, "launch-tok")
+    monkeypatch.setenv("GH_CONFIG_DIR", str(tmp_path / "gh"))
+    calls: list[object] = []
+    monkeypatch.setattr(h.subprocess, "run", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(
+        h, "_fetch", lambda *a, **k: {"connected": True, "token": "t", "login": "o"}
+    )
+    h.configure_host_git("http://srv", "host1")
+    assert h.configure_host_gh("http://srv", "host1") is False
+    assert h.start_host_gh_refresh("http://srv", "host1") is None
+    assert calls == []  # no git config writes
+    assert not (tmp_path / "gh" / "hosts.yml").exists()  # no hosts.yml write
 
 
 def test_gh_refresh_interval_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
