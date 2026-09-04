@@ -609,12 +609,9 @@ function SidebarImpl({
     [selectionMode, exitSelectionMode],
   );
 
-  // One paginated session list — sessions are no longer split by
-  // connection state, so the sidebar fetches a single undifferentiated
-  // list. Archived sessions are included (`includeArchived: true`) and
-  // peeled into their own "Archived" section at the bottom of the list.
-  // Session search now lives in the command palette (the "Search" button
-  // below), so the sidebar list itself is unfiltered.
+  // All-sessions query — fetches every accessible session (owned + shared)
+  // including archived ones. Used for inbox badge counts and WS reconciliation
+  // so approvals and comment notifications from shared sessions are never missed.
   const conversationsQuery = useConversations("", true, {
     reconcileWhileConnected: true,
     // Re-render only on fields the sidebar/ConversationList read, so the
@@ -632,17 +629,74 @@ function SidebarImpl({
     ],
   });
 
+  // Tab-scoped query — server-filtered for "mine", "shared", or "archived",
+  // disabled on the "all" tab. Paginates only the sessions relevant to the
+  // active tab so the sidebar never churns through hundreds of irrelevant pages
+  // while the user looks at a small filtered set (OMNI-6002).
+  const tabVisibility =
+    activeTab === "mine"
+      ? "mine"
+      : activeTab === "shared"
+        ? "shared"
+        : activeTab === "archived"
+          ? "archived"
+          : undefined;
+  const filteredConversationsQuery = useConversations(
+    "",
+    false,
+    { enabled: tabVisibility !== undefined },
+    undefined,
+    tabVisibility,
+  );
+  // "all" tab reuses the all-sessions query for display; every other tab uses
+  // the server-filtered query so the sentinel only paginates matching sessions.
+  const displayQuery = tabVisibility ? filteredConversationsQuery : conversationsQuery;
+
+  // Bounded background pagination for conversationsQuery (inbox badge / WS
+  // watch-set). On filtered tabs the display sentinel never drives
+  // conversationsQuery, so the badge would stay capped at its initial 30
+  // sessions. We fetch up to BADGE_EXTRA_PAGES extra pages (one at a time,
+  // gated on a ref so we stop and never spam) as soon as the tab mounts.
+  const BADGE_EXTRA_PAGES = 3;
+  const badgeExtraFetched = useRef(0);
+  const lastBadgeTab = useRef<typeof tabVisibility>(undefined);
+  const {
+    hasNextPage: allHasNextPage,
+    isFetchingNextPage: allIsFetching,
+    fetchNextPage: allFetchNextPage,
+  } = conversationsQuery;
+  useEffect(() => {
+    if (!tabVisibility) return;
+    if (lastBadgeTab.current !== tabVisibility) {
+      lastBadgeTab.current = tabVisibility;
+      badgeExtraFetched.current = 0;
+    }
+    if (badgeExtraFetched.current >= BADGE_EXTRA_PAGES) return;
+    if (!allHasNextPage || allIsFetching) return;
+    badgeExtraFetched.current += 1;
+    allFetchNextPage();
+  }, [tabVisibility, allHasNextPage, allIsFetching, allFetchNextPage]);
+
   // The scrollable list container — used as the IntersectionObserver root for
   // infinite scroll (auto-loading the next page as the sentinel nears view).
   const scrollContainerRef = useRef<HTMLElement>(null);
 
-  // Inbox badge — total approval prompts across loaded rows. Same
-  // `pending_elicitations_count` the per-row "awaiting" hand badge
-  // reads (live via WS /v1/sessions/updates), just summed.
-  const loadedRows = useMemo(
-    () => (conversationsQuery.data?.pages ?? []).flatMap((page) => page.data),
-    [conversationsQuery.data],
-  );
+  // Inbox badge — total approval prompts across loaded rows. We read from both
+  // conversationsQuery (all-sessions, page 1 coverage) AND filteredConversationsQuery
+  // (tab-scoped, grows as the user scrolls) so that scrolling any filtered tab
+  // extends badge coverage — the two caches overlap and dedup handles it.
+  const loadedRows = useMemo(() => {
+    const rows = [
+      ...(conversationsQuery.data?.pages ?? []).flatMap((p) => p.data),
+      ...(filteredConversationsQuery.data?.pages ?? []).flatMap((p) => p.data),
+    ];
+    const seen = new Set<string>();
+    return rows.filter((c) => {
+      if (seen.has(c.id)) return false;
+      seen.add(c.id);
+      return true;
+    });
+  }, [conversationsQuery.data, filteredConversationsQuery.data]);
   const pendingApprovals = useMemo(() => sumPendingApprovals(loadedRows), [loadedRows]);
   // Plus unseen file comments — the badge counts everything the Inbox
   // page lists. Comment queries are shared with the page/FileViewer
@@ -1085,7 +1139,7 @@ function SidebarImpl({
                 className="relative flex-1 overflow-y-auto px-2 pt-4 pb-3 [scrollbar-width:none] max-md:pb-16 [&::-webkit-scrollbar]:hidden"
               >
                 <ConversationList
-                  conversationsQuery={conversationsQuery}
+                  conversationsQuery={displayQuery}
                   scrollContainerRef={scrollContainerRef}
                   onRowClick={onNavClick}
                   searchQuery=""
