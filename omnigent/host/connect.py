@@ -587,6 +587,25 @@ _RUNNER_ENV_ALLOWLIST: frozenset[str] = frozenset(
         # ssh-agent auth, so git-over-SSH and SSH-cert-authenticated tooling
         # fail with "dial unix: missing address".
         "SSH_AUTH_SOCK",
+        # gcloud Application Default Credentials selectors, same class as
+        # KUBECONFIG above: AGY_ADC_AUTH is the boolean the Antigravity CLI
+        # (agy) reads to pick ADC auth, GOOGLE_APPLICATION_CREDENTIALS is a
+        # filesystem path to the ADC file (not the credential itself), and the
+        # project ids are plain selectors. Without them the CLI->daemon->runner
+        # strips drop the user's gcloud login, so every antigravity-native pane
+        # dispatched through a background host blocks at agy's interactive
+        # "Select login method" menu despite a valid ADC credential.
+        # CLOUDSDK_CONFIG / CLOUDSDK_ACTIVE_CONFIG_NAME select a non-default
+        # gcloud config dir/name. Deliberately exact names, NOT a CLOUDSDK_
+        # prefix: gcloud also defines CLOUDSDK_AUTH_ACCESS_TOKEN /
+        # CLOUDSDK_AUTH_REFRESH_TOKEN, which are live credentials and must not
+        # ride an open-ended prefix into the runner/harness environment.
+        "AGY_ADC_AUTH",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_CLOUD_PROJECT",
+        "GOOGLE_CLOUD_QUOTA_PROJECT",
+        "CLOUDSDK_CONFIG",
+        "CLOUDSDK_ACTIVE_CONFIG_NAME",
         # Telemetry master opt-in. MUST propagate, or the daemon-spawned runner
         # (and the harness it spawns) never see OMNIGENT_TELEMETRY_ENABLED, so
         # telemetry.init() no-ops there and omni-runner / omni-harness export
@@ -623,6 +642,9 @@ _RUNNER_ENV_ALLOWLIST: frozenset[str] = frozenset(
 # Allowed by prefix: locale family (``LC_*``), MLflow, and OpenTelemetry config —
 # both the standard ``OTEL_*`` vars and Omnigent's ``OMNIGENT_OTEL_*`` knobs
 # (capture-content, FastAPI toggle) so they reach the runner/harness too.
+# No ``CLOUDSDK_`` prefix on purpose: it would also pass gcloud's
+# ``CLOUDSDK_AUTH_*`` bearer/refresh tokens; the two config selectors are
+# allowlisted by exact name above instead.
 _RUNNER_ENV_ALLOWLIST_PREFIXES: tuple[str, ...] = ("LC_", "MLFLOW_", "OTEL_", "OMNIGENT_OTEL_")
 
 # Harness credential / endpoint env vars forwarded host→runner when
