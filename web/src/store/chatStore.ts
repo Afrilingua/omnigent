@@ -54,7 +54,7 @@ import type {
   UserMessageBlock,
 } from "@/lib/blocks";
 import { userInputElicitationKey } from "@/lib/askUserQuestion";
-import { LIVE_ITEM_PREFIX, structuredErrorFields } from "@/lib/blocks";
+import { LIVE_ITEM_PREFIX, PENDING_FILE_PREFIX, structuredErrorFields } from "@/lib/blocks";
 import { BlockStream } from "@/lib/blockStream";
 import { itemsToBlocks } from "@/lib/itemsToBlocks";
 import { emitBrowserActionRequest } from "@/lib/browserActionBus";
@@ -1623,7 +1623,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       // id would collide across attachments and strand a ghost chip (React
       // dedupes on the shared key) until a refresh replaces it with the
       // server's unique file_id.
-      const fileId = `pending:${attachmentKey(file)}`;
+      const fileId = `${PENDING_FILE_PREFIX}${attachmentKey(file)}`;
       return file.type.startsWith("image/")
         ? { type: "input_image" as const, file_id: fileId, filename }
         : { type: "input_file" as const, file_id: fileId, filename };
