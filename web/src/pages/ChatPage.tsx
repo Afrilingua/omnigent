@@ -2911,10 +2911,16 @@ function ComposerImpl({
     // conversation's draft and wrongly conclude the user is mid-sentence,
     // dropping the failed message on the way back to the session it failed in.
     if (settledConversationId !== conversationId) return;
-    useChatStore.setState({ failedSendDraft: null });
+    useChatStore.setState({
+      failedSendDraft: null,
+      pendingRetryStableId: failedSendDraft.stableId ?? null,
+    });
     // The user started something new while the send was in flight — their
     // in-progress text wins over a clobbering restore.
-    if (valueRef.current.trim() !== "" || filesRef.current.length > 0) return;
+    if (valueRef.current.trim() !== "" || filesRef.current.length > 0) {
+      useChatStore.setState({ pendingRetryStableId: null });
+      return;
+    }
     setValue(failedSendDraft.text);
     dirtyRef.current = true;
     if (failedSendDraft.files.length > 0) {
