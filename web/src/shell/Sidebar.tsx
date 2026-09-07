@@ -157,9 +157,8 @@ import { getSessionState, type SessionState } from "@/hooks/useSessionState";
 import { useChatStore } from "@/store/chatStore";
 import {
   isConversationUnseen,
-  isExplicitlyUnread,
   markConversationUnread,
-  useUnseenTick,
+  useConversationReadState,
 } from "@/hooks/useUnseenConversations";
 import { cn } from "@/lib/utils";
 import { useOmnigentAnalytics } from "@/lib/analytics";
@@ -246,6 +245,9 @@ const HostsByIdContext = createContext<ReadonlyMap<string, Host>>(new Map());
 const IsMobileContext = createContext<boolean>(false);
 const ViewerIdContext = createContext<string | null>(null);
 const ServerInfoContext = createContext<ReturnType<typeof useServerInfo>>("loading");
+const RowActivationContext = createContext<
+  (id: string, event: MouseEvent<HTMLAnchorElement>) => void
+>(() => {});
 // Rows report an in-progress inline-rename edit here so ConversationList can
 // hold the sort order for the edit's whole duration — the pointer often
 // leaves the list while typing, and a reorder then would shuffle rows around
@@ -268,6 +270,7 @@ function SidebarRowDataProvider({
   isMobile,
   viewerId,
   serverInfo,
+  onActivate,
   children,
 }: {
   projectNamesById: Map<string, string>;
@@ -276,6 +279,7 @@ function SidebarRowDataProvider({
   isMobile: boolean;
   viewerId: string | null;
   serverInfo: ReturnType<typeof useServerInfo>;
+  onActivate: (id: string, event: MouseEvent<HTMLAnchorElement>) => void;
   children: ReactNode;
 }) {
   return (
@@ -284,7 +288,11 @@ function SidebarRowDataProvider({
         <HostsByIdContext.Provider value={hostsById}>
           <IsMobileContext.Provider value={isMobile}>
             <ViewerIdContext.Provider value={viewerId}>
-              <ServerInfoContext.Provider value={serverInfo}>{children}</ServerInfoContext.Provider>
+              <ServerInfoContext.Provider value={serverInfo}>
+                <RowActivationContext.Provider value={onActivate}>
+                  {children}
+                </RowActivationContext.Provider>
+              </ServerInfoContext.Provider>
             </ViewerIdContext.Provider>
           </IsMobileContext.Provider>
         </HostsByIdContext.Provider>
@@ -1636,6 +1644,14 @@ function ConversationList({
   // parent walk loads — a top-level session resolves to itself.
   const activeRootSessionId = useActiveRootSessionId(activeId ?? null);
   const resolvedActiveId = activeRootSessionId ?? activeId ?? null;
+  const [optimisticActiveId, setOptimisticActiveId] = useState<string | null>(null);
+  useEffect(() => setOptimisticActiveId(null), [activeId]);
+  const activateRow = useCallback((id: string, event: MouseEvent<HTMLAnchorElement>) => {
+    if (event.defaultPrevented || event.button !== 0) return;
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    setOptimisticActiveId(id);
+  }, []);
+  const displayedActiveId = optimisticActiveId ?? resolvedActiveId;
   const [activeOverride, setActiveOverride] = useState<ActiveChatOverride | null>(null);
   useEffect(() => {
     setActiveOverride((prev) => computeNextActiveOverride(activeId, allConversations, prev));
@@ -2113,6 +2129,7 @@ function ConversationList({
       isMobile={isMobile}
       viewerId={viewerId}
       serverInfo={serverInfo}
+      onActivate={activateRow}
     >
       <DndContext
         sensors={sensors}
@@ -2169,7 +2186,7 @@ function ConversationList({
                     <ConversationSection
                       title="Pinned"
                       conversations={sections.pinned}
-                      activeConversationId={resolvedActiveId}
+                      activeConversationId={displayedActiveId}
                       pinnedConversationIds={pinnedConversationIds}
                       collapsed={effectiveCollapsedSections.includes("Pinned")}
                       onToggleCollapsed={() => effectiveToggleSectionCollapsed("Pinned")}
@@ -2228,7 +2245,7 @@ function ConversationList({
                       projectId={group.id}
                       icon={group.icon}
                       windowConversations={group.conversations}
-                      activeConversationId={resolvedActiveId}
+                      activeConversationId={displayedActiveId}
                       expanded={expandedProjects.includes(group.name)}
                       active={newSessionProjectName === group.name}
                       // Best-effort marker from the globally-loaded window: a
@@ -2269,7 +2286,7 @@ function ConversationList({
                     <ConversationSection
                       title="Sessions"
                       conversations={sections.sessions}
-                      activeConversationId={resolvedActiveId}
+                      activeConversationId={displayedActiveId}
                       emptyMessage={SIDEBAR_FILTER_EMPTY[activeTab]}
                       pinnedConversationIds={pinnedConversationIds}
                       collapsed={effectiveCollapsedSections.includes("Chats")}
@@ -3517,6 +3534,7 @@ function ConversationRowImpl({
   // portal), and a passive effect would leave a post-paint frame where churn
   // could reorder — and blur — the just-mounted input before the hold lands.
   const reportRowEditing = useContext(RowEditHoldContext);
+  const activateRow = useContext(RowActivationContext);
   useLayoutEffect(() => {
     if (!isEditing) return;
     reportRowEditing(conversation.id, true);
@@ -3608,10 +3626,13 @@ function ConversationRowImpl({
   const isProvisionalLabel =
     pendingTitle === null && conversation.title == null && optimisticTitle !== undefined;
   const hasDraft = useHasSessionDraft(conversation.id);
-  // Recompute unseen state the moment the last-seen map changes (e.g. the
-  // user picks "Mark as unread" on this row) rather than waiting for the
-  // next conversations poll.
-  useUnseenTick();
+  // A write for another conversation leaves this primitive snapshot unchanged,
+  // so useSyncExternalStore skips the heavy row render.
+  const readState = useConversationReadState(
+    conversation.id,
+    conversation.updated_at,
+    conversation.status,
+  );
   // The dot shows when the conversation is content-unseen AND either the
   // row isn't the one you're viewing OR you explicitly marked it unread.
   // `isConversationUnseen` still gates on status, so a *running* turn never
@@ -3619,9 +3640,7 @@ function ConversationRowImpl({
   // invisible until the turn finishes (then the dot lights like any unseen
   // row). The explicit override only lifts the active-row suppression, so
   // flagging the thread you're currently viewing surfaces the dot at once.
-  const hasUnseenMessages =
-    isConversationUnseen(conversation.id, conversation.updated_at, conversation.status) &&
-    (!isActive || isExplicitlyUnread(conversation.id));
+  const hasUnseenMessages = readState.unseen && (!isActive || readState.explicitlyUnread);
   // "Mark as unread" is offered on any row not already showing the dot.
   const canMarkUnread = !hasUnseenMessages;
   // Badge precedence: a pending approval ("Needs response") outranks the
@@ -3857,6 +3876,7 @@ function ConversationRowImpl({
           onToggleSelected(conversation.id, e.shiftKey);
           return;
         }
+        activateRow(conversation.id, e);
         onClick(e);
       }}
       onDoubleClick={(e) => {
