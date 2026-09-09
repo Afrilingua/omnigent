@@ -2419,7 +2419,7 @@ async def _persist_external_conversation_item(
             _publish_external_conversation_item(session_id, persisted_error)
     await _seed_missing_title_from_user_message(conv, item, conversation_store)
     if pending_background_title is not None:
-        pending_background_title.schedule()
+        pending_background_title.schedule(expected_seed_title=conv.title)
     _publish_external_conversation_item(
         session_id, persisted, cleared_pending_id=cleared_pending_id
     )
@@ -9046,7 +9046,7 @@ async def _create_session_from_existing_agent(
                     background_titles_enabled=background_session_titles_enabled(request.headers),
                 )
                 if pending_background_title is not None:
-                    pending_background_title.schedule()
+                    pending_background_title.schedule(expected_seed_title=conv.title)
     # Re-read rather than reusing the local ``conv``: the label-only branch
     # above and ``_forward_event_to_runner`` can mutate the row after it was
     # built, so a fresh read is what keeps the create response current.
