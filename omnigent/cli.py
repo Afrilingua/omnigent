@@ -2525,10 +2525,15 @@ class _HostHttpResult:
         HTTP response was received because the request failed locally.
     :param body: Decoded JSON object or response text, e.g.
         ``{"data": []}`` or ``"not found"``.
+    :param unreachable: ``True`` when the request failed because nothing
+        answered at a loopback address (connection refused against the local
+        server), as opposed to a slow or erroring server or a transient
+        failure against a remote one.
     """
 
     status_code: int
     body: _HostJsonObject | str
+    unreachable: bool = False
 
 
 @dataclass(frozen=True)
@@ -2559,11 +2564,14 @@ class _DaemonSessionsResult:
         local daemon's server cannot be discovered.
     :param sessions: Session rows owned by the daemon host id.
     :param error: Human-readable error text, or ``None`` on success.
+    :param unreachable: ``True`` when the error means the server is not
+        answering at all (dead or gone), not merely slow or erroring.
     """
 
     base_url: str | None
     sessions: list[_HostSessionRow]
     error: str | None
+    unreachable: bool = False
 
 
 @dataclass(frozen=True)
@@ -2575,12 +2583,15 @@ class _SessionsPageResult:
     :param last_id: Last session id in the page, e.g. ``"conv_abc123"``.
     :param has_more: Whether another page should be fetched.
     :param error: Human-readable error text, or ``None`` on success.
+    :param unreachable: ``True`` when the page fetch failed because the
+        server is not answering at all.
     """
 
     sessions: list[_HostSessionRow]
     last_id: str | None
     has_more: bool
     error: str | None
+    unreachable: bool = False
 
 
 @dataclass(frozen=True)
@@ -2590,10 +2601,13 @@ class _SessionPagesResult:
 
     :param sessions: Session rows across all fetched pages.
     :param error: Human-readable error text, or ``None`` on success.
+    :param unreachable: ``True`` when the query failed because the server
+        is not answering at all.
     """
 
     sessions: list[_HostSessionRow]
     error: str | None
+    unreachable: bool = False
 
 
 @dataclass(frozen=True)
@@ -8952,6 +8966,18 @@ def _trust_env_for(base_url: str) -> bool:
     return not is_loopback_url(base_url)
 
 
+def _is_loopback_base_url(base_url: str) -> bool:
+    """
+    Report whether *base_url* targets this machine's loopback interface.
+
+    :param base_url: Server base URL, e.g. ``"http://127.0.0.1:6767"``.
+    :returns: ``True`` for loopback targets, ``False`` otherwise.
+    """
+    from omnigent_client._http import is_loopback_url
+
+    return is_loopback_url(base_url)
+
+
 def _host_http_json(
     *,
     base_url: str,
@@ -9011,6 +9037,15 @@ def _host_http_json(
         return _HostHttpResult(
             status_code=0,
             body=f"{type(exc).__name__}: {exc}",
+            # Nothing accepted the connection at a loopback address: the
+            # local server is gone, not merely slow (ReadTimeout) or erroring
+            # (HTTP status). Remote connect failures stay ``False`` — DNS
+            # hiccups, network blips, or TLS faults can be transient against
+            # a live server, so callers keep the loud ``--force`` guidance.
+            unreachable=(
+                _is_loopback_base_url(base_url)
+                and isinstance(exc, (httpx.ConnectError, ConnectionRefusedError))
+            ),
         )
     body: _HostJsonObject | str
     try:
@@ -9082,6 +9117,7 @@ def _decode_sessions_page(
             last_id=None,
             has_more=False,
             error=f"session list failed: {_host_error_text(result.body)}",
+            unreachable=result.unreachable,
         )
     if result.status_code >= 400:
         return _SessionsPageResult(
@@ -9089,6 +9125,9 @@ def _decode_sessions_page(
             last_id=None,
             has_more=False,
             error=(f"session list failed ({result.status_code}): {_host_error_text(result.body)}"),
+            # No producer sets ``unreachable`` alongside an HTTP status today;
+            # propagate defensively so a future one is not silently dropped.
+            unreachable=result.unreachable,
         )
     if not isinstance(result.body, dict):
         return _SessionsPageResult(
@@ -9144,11 +9183,43 @@ def _fetch_session_pages(
         )
         page = _decode_sessions_page(page_result)
         if page.error is not None:
-            return _SessionPagesResult(sessions=[], error=page.error)
+            # A server that already served a page is provably alive, so a
+            # mid-pagination failure is never ``unreachable``: only the very
+            # first request (``after is None``) may carry the flag through.
+            return _SessionPagesResult(
+                sessions=[],
+                error=page.error,
+                unreachable=page.unreachable and after is None,
+            )
         sessions.extend(page.sessions)
         if not page.has_more or page.last_id is None:
             return _SessionPagesResult(sessions=sessions, error=None)
         after = page.last_id
+
+
+def _local_server_confirmed_dead() -> bool:
+    """
+    Report whether the recorded local server process is confirmed dead.
+
+    A failed ``/health`` probe alone must not count: a live-but-slow server
+    misses the 2s probe too, and ``local_server_url_if_healthy`` collapses
+    both cases to ``None``. Only a missing pidfile or a recorded PID that
+    no longer runs proves the server is gone rather than slow.
+
+    :returns: ``True`` when no recorded local server process is alive.
+    """
+    from omnigent.host.local_server import _LOCAL_SERVER_PID_PATH, _read_local_server_pid_file
+
+    if not _LOCAL_SERVER_PID_PATH.exists():
+        # No pidfile means no recorded server that could still be alive.
+        return True
+    existing = _read_local_server_pid_file()
+    if existing is None:
+        # The pidfile exists but is unreadable/corrupt: the server's state
+        # is unknown, not provably dead — keep the loud ``--force`` path.
+        return False
+    pid, _port = existing
+    return not _pid_alive(pid)
 
 
 def _sessions_for_daemon(
@@ -9166,10 +9237,15 @@ def _sessions_for_daemon(
     """
     base_url = _daemon_base_url(record)
     if base_url is None:
+        # Local mode with no healthy server on record. A failed ``/health``
+        # probe may just be a slow or briefly erroring server, so "gone" is
+        # claimed only when the recorded server process is confirmed dead;
+        # otherwise the caller keeps the loud ``--force`` guidance.
         return _DaemonSessionsResult(
             base_url=None,
             sessions=[],
             error="local Omnigent server is not reachable",
+            unreachable=_local_server_confirmed_dead(),
         )
     host_id = record.host_id or _load_existing_host_id()
     if not host_id:
@@ -9183,7 +9259,12 @@ def _sessions_for_daemon(
         connected_only=connected_only,
     )
     if pages.error is not None:
-        return _DaemonSessionsResult(base_url=base_url, sessions=[], error=pages.error)
+        return _DaemonSessionsResult(
+            base_url=base_url,
+            sessions=[],
+            error=pages.error,
+            unreachable=pages.unreachable,
+        )
     owned = [s for s in pages.sessions if s.get("host_id") == host_id]
     return _DaemonSessionsResult(base_url=base_url, sessions=owned, error=None)
 
@@ -9922,6 +10003,16 @@ def _stop_daemon_sessions(
     """
     result = _sessions_for_daemon(record)
     if result.error is not None:
+        if result.unreachable:
+            # A dead server holds no reachable sessions to stop; failing here
+            # would strand the daemon and its record until the user discovers
+            # --force. Degrade to a daemon-only stop instead.
+            click.echo(
+                f"{_host_display_url(record.target)}: server is unreachable; "
+                f"skipping session stop: {result.error}",
+                err=True,
+            )
+            return 0
         raise click.ClickException(
             f"{_host_display_url(record.target)}: {result.error} — retry with --force to stop the "
             f"daemon anyway, or --daemon-only to skip the session stop entirely."
