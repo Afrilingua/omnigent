@@ -12,9 +12,13 @@ from typing import Any, Literal, cast
 import httpx
 from fastapi import (
     APIRouter,
+    HTTPException,
     Request,
 )
 from fastapi.responses import StreamingResponse
+from fastapi.routing import APIRoute
+from starlette.datastructures import Headers
+from starlette.types import Message, Receive, Scope, Send
 
 from omnigent.debug_logging import add_audit_attrs, mark_request_audit_suppressed
 from omnigent.entities import (
@@ -209,6 +213,10 @@ from omnigent.server.schemas import (
     McpServerStartup,
     SessionEventInput,
 )
+from omnigent.session_event_batch import (
+    MAX_SESSION_EVENT_BATCH_EVENTS,
+    MAX_SESSION_EVENT_REQUEST_BYTES,
+)
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.file_store import FileStore
@@ -240,6 +248,46 @@ _TRANSIENT_AUDIT_EVENT_TYPES = frozenset(
         _EXTERNAL_SESSION_USAGE_TYPE,
     }
 )
+
+
+def _event_body_too_large() -> HTTPException:
+    """Build the shared error for an oversized session-event request."""
+    return HTTPException(
+        status_code=400,
+        detail="session event request exceeds the 10 MiB limit",
+    )
+
+
+class _SessionEventBodyLimitRoute(APIRoute):
+    """Reject oversized event bodies before FastAPI parses them."""
+
+    async def handle(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Enforce the encoded request limit from headers and ASGI chunks."""
+        if scope["type"] != "http":
+            await super().handle(scope, receive, send)
+            return
+
+        content_length = Headers(scope=scope).get("content-length")
+        if content_length is not None:
+            try:
+                declared_bytes = int(content_length)
+            except ValueError:
+                declared_bytes = 0
+            if declared_bytes > MAX_SESSION_EVENT_REQUEST_BYTES:
+                raise _event_body_too_large()
+
+        received_bytes = 0
+
+        async def receive_bounded() -> Message:
+            nonlocal received_bytes
+            message = await receive()
+            if message["type"] == "http.request":
+                received_bytes += len(message.get("body", b""))
+                if received_bytes > MAX_SESSION_EVENT_REQUEST_BYTES:
+                    raise _event_body_too_large()
+            return message
+
+        await super().handle(scope, receive_bounded, send)
 
 
 def _retry_recovery_lock(session_id: str) -> asyncio.Lock:
@@ -386,6 +434,8 @@ def register_events_routes(
 ) -> None:
     """Register the events, stream, and delete routes on router."""
 
+    event_router = APIRouter(route_class=_SessionEventBodyLimitRoute)
+
     def _has_runner_created_by_authority(request: Request, conv: Any) -> bool:
         token = (request.headers.get(RUNNER_TUNNEL_TOKEN_HEADER) or "").strip()
         if not token:
@@ -395,7 +445,7 @@ def register_events_routes(
         runner_id = getattr(conv, "runner_id", None)
         return isinstance(runner_id, str) and token_bound_runner_id(token) == runner_id
 
-    @router.post(
+    @event_router.post(
         "/sessions/{session_id}/events",
         # Internal event ingestion — hidden from the public API reference.
         include_in_schema=False,
@@ -407,22 +457,48 @@ def register_events_routes(
     async def post_event(
         request: Request,
         session_id: str,
-        body: SessionEventInput,
-    ) -> dict[str, bool | str]:
+        body: SessionEventInput | list[SessionEventInput],
+    ) -> dict[str, bool | str] | list[dict[str, bool | str]]:
         """
         Route entry for :func:`_post_event_impl`.
 
-        A message counts as in flight for the whole request — including any
-        runner launch it triggers — so the session list reports a booting
-        session as running instead of idle.
+        A single object preserves the existing API. A top-level JSON array is
+        processed in order and returns one acknowledgement per event when all
+        entries succeed. Batch execution is not atomic: if an entry fails,
+        earlier entries remain applied, later entries are not attempted, and
+        the error response does not include acknowledgements from earlier
+        entries. Messages count as in flight for the whole request, including
+        runner launch.
         """
         with contextlib.ExitStack() as in_flight:
+            if isinstance(body, list):
+                if not body:
+                    raise OmnigentError(
+                        "session event batch must not be empty",
+                        code=ErrorCode.INVALID_INPUT,
+                    )
+                if len(body) > MAX_SESSION_EVENT_BATCH_EVENTS:
+                    raise OmnigentError(
+                        "session event batch exceeds the 100-event limit",
+                        code=ErrorCode.INVALID_INPUT,
+                    )
+                return [
+                    await _post_event_impl(
+                        request,
+                        session_id,
+                        event,
+                        in_flight=in_flight if event.type == "message" else None,
+                    )
+                    for event in body
+                ]
             return await _post_event_impl(
                 request,
                 session_id,
                 body,
                 in_flight=in_flight if body.type == "message" else None,
             )
+
+    router.include_router(event_router)
 
     async def _post_event_impl(
         request: Request,
