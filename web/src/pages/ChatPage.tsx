@@ -2615,7 +2615,10 @@ function ComposerImpl({
   // server-side (the runner blocks on the verdict Future), so a message
   // sent now would sit queued and unread until the card is answered —
   // and for native wrappers the injected text could land in the vendor
-  // TUI's permission prompt. Lock the composer until the verdict is in.
+  // TUI's permission prompt. Lock the SEND path until the verdict is in
+  // (submit() guard + disabled Send button), but keep the textarea itself
+  // editable: disabling it ejects browser focus mid-word when a prompt
+  // lands while the user is typing, silently dropping their keystrokes.
   // Mirrored sub-agent prompts (targetSessionId set to a child session)
   // don't gate this session's inbox, so they don't lock it.
   const hasPendingElicitation = useChatStore((s) =>
@@ -3625,8 +3628,15 @@ function ComposerImpl({
                           : "Send a message…"
             }
             rows={1}
-            disabled={disabled || isReadOnly || unreachable || hasPendingElicitation}
+            // A pending elicitation must NOT disable the textarea: disabling
+            // ejects focus to <body> mid-word and later keystrokes vanish.
+            // The draft stays typable; sending is still gated (submit() +
+            // the disabled Send button) until the prompt is answered.
+            disabled={disabled || isReadOnly || unreachable}
             data-slash-command={composerIsCommand ? "true" : undefined}
+            // Full send intent (text OR attachments OR mentions) for the
+            // approve hotkey's drafting guard, which only sees this element.
+            data-has-draft={hasDraft ? "true" : undefined}
             className={cn(
               "relative w-full resize-none overflow-y-auto bg-transparent px-4 pt-3 pb-2 text-ui outline-none [scrollbar-width:none] placeholder:text-muted-foreground disabled:opacity-60 [&::-webkit-scrollbar]:hidden",
               // Hand glyph painting to the overlay while a command is drafted;
