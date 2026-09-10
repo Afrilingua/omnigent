@@ -60,16 +60,28 @@ _CATALOG_DEFAULTS = {
 @pytest.fixture(autouse=True)
 def _clear_ambient_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     """
-    Clear ambient vendor keys so they cannot leak into the spawn env.
+    Clear ambient vendor keys and gateway routing so they cannot leak into
+    the spawn env.
 
     The coding-agent process may have ``ANTHROPIC_API_KEY`` /
-    ``OPENAI_API_KEY`` / ``DATABRICKS_TOKEN`` set; clearing them keeps the
-    tests deterministic (the provider path resolves keys from the config
-    file, not the ambient environment).
+    ``OPENAI_API_KEY`` / ``DATABRICKS_TOKEN`` set; a gateway-driven shell also
+    exports ``ANTHROPIC_BASE_URL`` / ``ANTHROPIC_MODEL`` /
+    ``ANTHROPIC_CUSTOM_HEADERS``. Detection folds those routing vars into the
+    detected anthropic entry, which would redirect the "routes to
+    api.anthropic.com" assertions at the developer's own gateway (issue #4279).
+    Clearing them keeps the tests deterministic (the provider path resolves
+    from the config file, not the ambient environment).
 
     :param monkeypatch: Pytest monkeypatch fixture.
     """
-    for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DATABRICKS_TOKEN"):
+    for var in (
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "DATABRICKS_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_CUSTOM_HEADERS",
+    ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(
         "omnigent.runtime.workflow._resolve_catalog_default_model",
@@ -81,6 +93,25 @@ def _clear_ambient_keys(monkeypatch: pytest.MonkeyPatch) -> None:
             model_id=_CATALOG_DEFAULTS[(provider_name, family)]
         ),
     )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_ambient_provider_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Isolate host state ambient provider detection reads (issue #4279).
+
+    Two ambient sources leak past ``$OMNIGENT_CONFIG_HOME``:
+
+    - ``~/.codex/config.toml`` and ``~/.databrickscfg`` live under ``$HOME``
+      (``$USERPROFILE`` on Windows), so redirect it to an empty temp dir.
+    - On macOS ``_claude_login_detected()`` falls back to ``claude auth status``,
+      which reads the **Keychain** — no ``$HOME`` override can hide it. A
+      signed-in Mac would inject a ``subscription`` provider that outranks the
+      test's own configured entry, so stub it to "not logged in". Tests that
+      exercise a detected login can still override this in call order.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setattr("omnigent.onboarding.ambient._claude_login_detected", lambda: False)
 
 
 @pytest.fixture
