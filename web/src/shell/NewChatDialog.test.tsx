@@ -1709,7 +1709,7 @@ describe("NewChatLandingScreen", () => {
     expect(permission.querySelector("span")).not.toHaveClass("hidden");
     expect(worktree).toHaveClass(
       "h-6",
-      "max-w-[180px]",
+      "max-w-[calc(50%-0.25rem)]",
       "gap-1",
       "rounded-md",
       "bg-transparent",
@@ -3247,6 +3247,7 @@ describe("NewChatLandingScreen", () => {
     expect(workspaceLabel).toHaveClass("min-w-0", "truncate", "text-left");
     expect(screen.getByTestId("new-chat-landing-workspace-chip")).toHaveClass(
       "h-6",
+      "max-w-[calc(50%-0.25rem)]",
       "gap-1",
       "px-1",
       "text-xs",
