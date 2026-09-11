@@ -144,8 +144,11 @@ import {
 import { getSessionHost } from "@/lib/sessionHost";
 import { isSystemUserContent, taskNotificationMarkerContent } from "@/lib/systemMessage";
 import { isNativeTerminalSession as isNativeTerminalSessionFn } from "@/lib/nativeCodingAgents";
+import type { StoredReplyDraft } from "@/lib/replyDraft";
 
 export interface SendOptions {
+  /** Client-only quote provenance, retained if the composer needs to retry. */
+  replyDraft?: StoredReplyDraft;
   /**
    * Fires synchronously after `createSession` returns for a brand-new
    * session (before the first message is posted). Callers use this
@@ -444,6 +447,7 @@ export interface QueuedMessage {
   queueId: string;
   /** Fully-assembled message text (mentions/quotes already applied). */
   text: string;
+  replyDraft?: StoredReplyDraft;
   /** Attachments to send with the message. */
   files?: File[];
   /** Owning conversation, so a switch/idle only flushes its own queue. */
@@ -691,6 +695,7 @@ export interface ConversationState {
     text: string;
     files: File[];
     stableId?: string;
+    replyDraft?: StoredReplyDraft;
   } | null;
   /**
    * Stable id set by the failedSendDraft restore path so the next send()
@@ -937,7 +942,7 @@ export interface ChatActions {
    * while the agent is busy. The head is flushed automatically (FIFO, one per
    * turn) when the session next goes idle — see the `session_status` handler.
    */
-  enqueueMessage: (text: string, files?: File[]) => void;
+  enqueueMessage: (text: string, files?: File[], replyDraft?: StoredReplyDraft) => void;
   /** Remove a queued message by id (the strip's per-row delete). */
   dequeueMessage: (queueId: string) => void;
   /**
@@ -1674,7 +1679,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
   abortController: null,
   historyGeneration: 0,
 
-  enqueueMessage: (text, files) => {
+  enqueueMessage: (text, files, replyDraft) => {
     const { conversationId, boundAgentId } = get();
     if (conversationId === null) return;
     queueSeq += 1;
@@ -1690,6 +1695,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
           conversationId,
           ...(boundAgentId !== null ? { agentId: boundAgentId } : {}),
           ...(files && files.length > 0 ? { files } : {}),
+          ...(replyDraft ? { replyDraft } : {}),
         },
       ],
     }));
@@ -1741,7 +1747,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     if (target === undefined || agentId === null) return;
     // Remove BEFORE the POST so a concurrent flush can't also send it.
     setActive({ queuedMessages: s.queuedMessages.filter((m) => m.queueId !== queueId) });
-    void s.send(target.text, agentId, target.files);
+    void s.send(target.text, agentId, target.files, { replyDraft: target.replyDraft });
   },
 
   clearQueuedMessages: (conversationId) => {
@@ -1788,7 +1794,9 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     if (head === undefined) return;
     // Remove it BEFORE the POST so a re-entrant flush can't double-send.
     setActive({ queuedMessages: s.queuedMessages.filter((m) => m.queueId !== head.queueId) });
-    void s.send(head.text, head.agentId ?? s.boundAgentId, head.files);
+    void s.send(head.text, head.agentId ?? s.boundAgentId, head.files, {
+      replyDraft: head.replyDraft,
+    });
   },
 
   flushBackgroundQueues: () => {
@@ -2111,7 +2119,13 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       const draftSessionId = postedSessionId ?? submitConversationId;
       if (draftSessionId !== null && (text.trim() !== "" || (files?.length ?? 0) > 0)) {
         setterFor(draftSessionId)({
-          failedSendDraft: { conversationId: draftSessionId, text, files: files ?? [], stableId },
+          failedSendDraft: {
+            conversationId: draftSessionId,
+            text,
+            files: files ?? [],
+            stableId,
+            ...(opts?.replyDraft ? { replyDraft: opts.replyDraft } : {}),
+          },
         });
       }
       // Settle the conversation this send targeted, wherever the user is now:
