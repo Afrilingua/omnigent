@@ -1813,6 +1813,10 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
             showCodexApprovalMode={showCodexApprovalMode}
             showGoalControl={showGoalControl}
             runnerOnline={runnerOnline}
+            runnerStarting={
+              sandboxStatus?.stage !== "failed" &&
+              (sandboxLaunching || liveness.kind === "starting")
+            }
             showClaudeGoalControl={showClaudeGoalControl}
             showPollyCodexGoalControl={showPollyCodexGoalControl}
             isTerminalFirst={isTerminalFirst}
@@ -1935,6 +1939,8 @@ interface ComposerProps {
   showGoalControl?: boolean;
   /** Whether the active session's runner tunnel is connected. */
   runnerOnline?: boolean;
+  /** The session is launching or waking its runner or managed sandbox. */
+  runnerStarting?: boolean;
   /** Show Polly's Claude SDK command-backed Goal control. */
   showClaudeGoalControl?: boolean;
   /** Show Polly's Codex command-backed Goal control. */
@@ -2273,6 +2279,7 @@ function ComposerImpl(
     showCodexApprovalMode = false,
     showGoalControl = false,
     runnerOnline,
+    runnerStarting = false,
     showClaudeGoalControl = false,
     showPollyCodexGoalControl = false,
     isTerminalFirst = false,
@@ -2573,6 +2580,14 @@ function ComposerImpl(
   // on bind and populate the suggestions menu as ``/skill-name``
   // entries alongside the built-ins.
   const skills = useChatStore((s) => s.skills);
+  const reportedSkillsStatus = useChatStore((s) => s.skillsStatus);
+  const terminalPending = useChatStore((s) => s.terminalPending);
+  // Discovery cannot start until the runner connects; its launch is still loading.
+  const skillsStatus =
+    reportedSkillsStatus === "unavailable" && (runnerStarting || terminalPending)
+      ? "loading"
+      : reportedSkillsStatus;
+  const refreshSkills = useChatStore((s) => s.refreshSkills);
   // ``/model`` writes ``conv.model_override`` (the same column the REPL's
   // ``/model`` and native pickers write). In-process harnesses re-resolve
   // it each turn; native wrappers expose it only when they have a picker
@@ -2633,20 +2648,28 @@ function ComposerImpl(
   // keyboard nav indexes into the same list.
   const menuMatches = menuOpen ? rankedSlashCommandNames(slashCommands, menuQuery) : [];
 
-  // Pre-select the first match whenever the filtered list changes — both
-  // when the menu first opens (matches go [] → non-empty) and as the query
-  // narrows it. Highlighting the top item is what lets Tab/Enter complete it
-  // without the user arrowing down first; the keydown completion branch is
-  // gated on ``menuIndex >= 0``. Arrow navigation only mutates ``menuIndex``
-  // (not ``menuMatches``), so it never trips this reset.
-  const prevMenuMatchesRef = useRef<string[]>([]);
+  // New queries select the first match; asynchronous arrivals retain the selected name.
+  const prevMenuMatchesRef = useRef<{ query: string; names: string[] }>({ query: "", names: [] });
   if (
-    menuMatches.length !== prevMenuMatchesRef.current.length ||
-    menuMatches.some((m, i) => m !== prevMenuMatchesRef.current[i])
+    menuQuery !== prevMenuMatchesRef.current.query ||
+    menuMatches.length !== prevMenuMatchesRef.current.names.length ||
+    menuMatches.some((m, i) => m !== prevMenuMatchesRef.current.names[i])
   ) {
-    prevMenuMatchesRef.current = menuMatches;
-    setMenuIndex(menuMatches.length > 0 ? 0 : -1);
+    const previousName = prevMenuMatchesRef.current.names[menuIndex];
+    const retainedIndex =
+      prevMenuMatchesRef.current.query === menuQuery && previousName
+        ? menuMatches.indexOf(previousName)
+        : -1;
+    prevMenuMatchesRef.current = { query: menuQuery, names: menuMatches };
+    setMenuIndex(retainedIndex >= 0 ? retainedIndex : menuMatches.length > 0 ? 0 : -1);
   }
+
+  useEffect(() => {
+    if (!menuOpen || skillsStatus !== "loading") return;
+    // Recover a missed SSE nudge once while the user is waiting for this menu.
+    const timer = window.setTimeout(() => void refreshSkills(false), 5_000);
+    return () => window.clearTimeout(timer);
+  }, [menuOpen, skillsStatus, refreshSkills]);
 
   // "@"-mention is a drill-down file/folder browser. The token after "@"
   // doubles as a path: text up to the last "/" is the directory being
@@ -3164,6 +3187,25 @@ function ComposerImpl(
     // "/"-command). Takes priority over history recall and submission.
     if (!shouldPreferSendOverCompletion && handleMentionKeyDown(e)) return;
 
+    if (menuOpen && (menuMatches.length > 0 || skillsStatus != null) && e.key === "Escape") {
+      e.preventDefault();
+      setValue("");
+      setMenuIndex(-1);
+      return;
+    }
+
+    // A loading-only menu has no completion yet; don't submit the partial token.
+    if (
+      menuOpen &&
+      skillsStatus === "loading" &&
+      menuMatches.length === 0 &&
+      !shouldPreferSendOverCompletion &&
+      (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && !isMobile))
+    ) {
+      e.preventDefault();
+      return;
+    }
+
     // When the suggestions menu is open, ArrowUp/Down navigate it and
     // Enter/Tab complete the highlighted item. These take priority over
     // history recall and normal submission.
@@ -3185,13 +3227,6 @@ function ComposerImpl(
       ) {
         e.preventDefault();
         applyMenuSelection(menuMatches[menuIndex]!);
-        return;
-      }
-      if (e.key === "Escape") {
-        e.preventDefault();
-        // Dismiss the menu by clearing the input so the user can start fresh.
-        setValue("");
-        setMenuIndex(-1);
         return;
       }
     }
@@ -3470,6 +3505,8 @@ function ComposerImpl(
                   activeIndex={menuIndex}
                   onSelect={applyMenuSelection}
                   commands={slashCommands}
+                  skillsStatus={skillsStatus}
+                  onRetrySkills={() => void refreshSkills()}
                 />
               )}
               {/* "@"-file-mention browser — native coding-agent sessions only.

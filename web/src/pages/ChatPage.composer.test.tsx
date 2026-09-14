@@ -2132,6 +2132,140 @@ describe("rankedSlashCommandNames", () => {
   });
 });
 
+describe("Composer asynchronous skills", () => {
+  beforeEach(() => {
+    clearSessionDrafts();
+    useChatStore.setState({
+      conversationId: "conv_loading_skills",
+      skills: [],
+      skillsStatus: "loading",
+      terminalPending: false,
+    });
+  });
+  afterEach(() => {
+    cleanup();
+    clearSessionDrafts();
+    useChatStore.setState({ skills: [], skillsStatus: null, terminalPending: false });
+    vi.useRealTimers();
+  });
+
+  it.each([
+    { runnerStarting: true, terminalPending: false },
+    { runnerStarting: false, terminalPending: true },
+  ])("waits for skills while the session starts: %j", ({ runnerStarting, terminalPending }) => {
+    useChatStore.setState({ skillsStatus: "unavailable", terminalPending });
+    const props = composerProps({ runnerStarting });
+    render(<Composer {...props} />);
+    fireEvent.change(textarea(), { target: { value: "/review" } });
+    expect(screen.getByText("Loading skills…")).toBeVisible();
+    expect(screen.queryByText("Skills unavailable while disconnected.")).toBeNull();
+    fireEvent.keyDown(textarea(), { key: "Enter" });
+    expect(props.onSend).not.toHaveBeenCalled();
+    act(() =>
+      useChatStore.setState({
+        skills: [{ name: "code-review", description: "Review code" }],
+        skillsStatus: "ready",
+      }),
+    );
+    expect(screen.queryByText("Loading skills…")).toBeNull();
+    fireEvent.keyDown(textarea(), { key: "Tab" });
+    expect(textarea()).toHaveValue("/code-review ");
+  });
+
+  it("stops showing startup loading when the runner stays disconnected", () => {
+    useChatStore.setState({ skillsStatus: "unavailable" });
+    const props = composerProps({ runnerStarting: true });
+    const { rerender } = render(<Composer {...props} />);
+    fireEvent.change(textarea(), { target: { value: "/" } });
+    expect(screen.getByText("Loading skills…")).toBeVisible();
+    rerender(<Composer {...props} runnerStarting={false} />);
+    expect(screen.queryByText("Loading skills…")).toBeNull();
+    expect(screen.getByText("Skills unavailable while disconnected.")).toBeVisible();
+  });
+
+  it("shows discovery errors even when the session is still starting", () => {
+    useChatStore.setState({ skillsStatus: "error" });
+    render(<Composer {...composerProps({ runnerStarting: true })} />);
+    fireEvent.change(textarea(), { target: { value: "/review" } });
+    expect(screen.queryByText("Loading skills…")).toBeNull();
+    expect(screen.getByText("Couldn’t load skills.")).toBeVisible();
+  });
+
+  it("dismisses a loading-only menu before interrupting a running session", () => {
+    const props = composerProps({ isWorking: true });
+    render(<Composer {...props} />);
+    fireEvent.change(textarea(), { target: { value: "/review" } });
+    fireEvent.keyDown(textarea(), { key: "Escape" });
+    expect(props.onStop).not.toHaveBeenCalled();
+    expect(textarea()).toHaveValue("");
+    expect(screen.queryByText("Loading skills…")).toBeNull();
+  });
+
+  it("recovers a missed notification once without polling while discovery stays loading", async () => {
+    vi.useFakeTimers();
+    const original = useChatStore.getState().refreshSkills;
+    const refreshSkills = vi.fn(async () => {
+      await Promise.resolve();
+      useChatStore.setState({ skills: [], skillsStatus: "loading" });
+    });
+    useChatStore.setState({ refreshSkills });
+    try {
+      render(<Composer {...composerProps()} />);
+      fireEvent.change(textarea(), { target: { value: "/review" } });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(refreshSkills).toHaveBeenCalledExactlyOnceWith(false);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15_000);
+      });
+      expect(refreshSkills).toHaveBeenCalledOnce();
+      act(() => useChatStore.setState({ skillsStatus: "ready" }));
+      act(() => vi.advanceTimersByTime(5_000));
+      expect(refreshSkills).toHaveBeenCalledOnce();
+    } finally {
+      cleanup();
+      useChatStore.setState({ refreshSkills: original });
+    }
+  });
+
+  it("preserves the highlighted command when skills arrive", () => {
+    render(<Composer {...composerProps()} />);
+    fireEvent.change(textarea(), { target: { value: "/" } });
+    fireEvent.keyDown(textarea(), { key: "ArrowDown" });
+    const selected = activeRow()?.textContent;
+    act(() =>
+      useChatStore.setState({
+        skills: [{ name: "review", description: "Review code" }],
+        skillsStatus: "ready",
+      }),
+    );
+    expect(screen.getByTestId("slash-menu-item-review")).toBeVisible();
+    expect(activeRow()?.textContent).toBe(selected);
+    expect(screen.queryByText("Loading skills…")).toBeNull();
+  });
+
+  it("waits for completion instead of sending a partial skill name", () => {
+    const props = composerProps();
+    render(<Composer {...props} />);
+    fireEvent.change(textarea(), { target: { value: "/review" } });
+    expect(screen.getByText("Loading skills…")).toBeVisible();
+    fireEvent.keyDown(textarea(), { key: "Enter" });
+    fireEvent.keyDown(textarea(), { key: "Tab" });
+    expect(props.onSend).not.toHaveBeenCalled();
+    expect(textarea()).toHaveValue("/review");
+    act(() =>
+      useChatStore.setState({
+        skills: [{ name: "code-review", description: "Review code" }],
+        skillsStatus: "ready",
+      }),
+    );
+    fireEvent.keyDown(textarea(), { key: "Tab" });
+    expect(textarea()).toHaveValue("/code-review ");
+    expect(props.onSend).not.toHaveBeenCalled();
+  });
+});
+
 describe("SlashCommandMenu", () => {
   const COMMANDS = {
     "/alpha": "First",
