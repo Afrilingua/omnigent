@@ -1667,6 +1667,7 @@ class TerminalInstance:
                     self.name,
                     self.session_key,
                     exc,
+                    extra=self._probe_log_extra("terminal_probe_failed"),
                 )
                 session_exists = await self._tmux_session_exists_async()
                 if session_exists is not False:
@@ -1963,6 +1964,7 @@ class TerminalInstance:
                 self.name,
                 self.session_key,
                 exc,
+                extra=self._probe_log_extra("terminal_probe_failed"),
             )
             return None
 
