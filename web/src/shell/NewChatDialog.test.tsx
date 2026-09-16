@@ -2892,7 +2892,7 @@ describe("NewChatLandingScreen", () => {
       "rounded-t-2xl",
       "border",
       "border-b-0",
-      "bg-muted/70",
+      "composer-workspace-surface",
       "px-2",
       "py-1.5",
     );
