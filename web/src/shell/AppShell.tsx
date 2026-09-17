@@ -1,12 +1,8 @@
+import { useLoadedConversations } from "@/hooks/useSidebarData";
 import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Outlet, useParams, useSearchParams } from "@/lib/routing";
-import {
-  PROJECT_LABEL_KEY,
-  type Conversation,
-  useConversations,
-  useProjects,
-} from "@/hooks/useConversations";
+import { PROJECT_LABEL_KEY, type Conversation, useProjects } from "@/hooks/useConversations";
 import { conversationDisplayLabel, UNTITLED_CONVERSATION_LABEL } from "./sidebarNav";
 import { useSessionAgent } from "@/hooks/useAgents";
 import { useApproveHotkey } from "@/hooks/useApproveHotkey";
@@ -461,12 +457,8 @@ export function AppShell() {
   const agentTerminal = useMemo(() => findAgentTerminal(terminals), [terminals]);
 
   const debugMode = useDebugMode();
-  // Restrict the observer to the fields AppShell actually reads: the 30s
-  // refetchInterval otherwise re-renders this whole shell on every background
-  // `isFetching`/`dataUpdatedAt` flap even when the list is unchanged.
-  const { data: conversationsData, isLoading: conversationsLoading } = useConversations("", true, {
-    notifyOnChangeProps: ["data", "isLoading"],
-  });
+  // Reuse sidebar rows; the active-session snapshot covers sessions outside its cache.
+  const { data: conversationsData, isLoading: conversationsLoading } = useLoadedConversations();
   const optimisticConversationTitle = useOptimisticTitle(conversationId ?? "");
   // Surface sessions needing attention as OS notifications + a dock badge.
   // Mounted here (inside the Router) so it can navigate on click and knows
@@ -582,7 +574,7 @@ export function AppShell() {
     (isTempConvId(conversationId)
       ? (optimisticConversationTitle ?? UNTITLED_CONVERSATION_LABEL)
       : null) ||
-    (isChildSession ? UNTITLED_CONVERSATION_LABEL : null);
+    (isChildSession || activeSession?.id === conversationId ? UNTITLED_CONVERSATION_LABEL : null);
   const headerProjectSummary =
     breadcrumbConv?.project_id != null
       ? projectSummaries?.find((p) => p.id === breadcrumbConv.project_id)
