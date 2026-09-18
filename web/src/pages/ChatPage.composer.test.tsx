@@ -3557,7 +3557,7 @@ describe("Composer — queued-message flush gating", () => {
   });
 });
 
-describe("Composer — ArrowUp edit of a queued message", () => {
+describe("Composer — editing queued messages", () => {
   const CONV = "conv_uparrow_edit";
   const QUEUED_TEXT = "queued follow-up recalled for editing";
 
@@ -3646,6 +3646,43 @@ describe("Composer — ArrowUp edit of a queued message", () => {
     await waitFor(() => expect(textarea().value).toBe(QUEUED_TEXT));
     expect(screen.getByText("notes.txt")).toBeTruthy();
     expect(useChatStore.getState().queuedMessages).toHaveLength(0);
+  });
+
+  it.each([
+    ["", "screenshot.png"],
+    ["Look at this", "screenshot.png"],
+    ["", ""],
+    ["Look at this", ""],
+  ])("preserves queued text %j and screenshot %j when edited and re-sent", (text, name) => {
+    const file = new File([new Uint8Array(10)], name, { type: "image/png" });
+    const displayName = name || "image.png";
+    useChatStore.setState({
+      queuedMessages: [{ queueId: "q_image", text, conversationId: CONV, files: [file] }],
+    });
+    const onSend = vi.fn(useChatStore.getState().enqueueMessage);
+    renderWithTooltips(<Composer {...composerProps({ onSend })} />);
+
+    const strip = screen.getByTestId("composer-queued-strip");
+    expect(strip).toHaveTextContent(displayName);
+    if (text) expect(strip).toHaveTextContent(text);
+    expect(useChatStore.getState().queuedMessages[0]?.text).toBe(text);
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit queued message" }));
+
+    expect(textarea()).toHaveValue(text);
+    expect(screen.getByAltText(displayName)).toBeInTheDocument();
+    expect(useChatStore.getState().queuedMessages).toHaveLength(0);
+    fireEvent.keyDown(textarea(), { key: "Enter" });
+
+    expect(onSend).toHaveBeenCalledWith(text, [file]);
+    expect(onSend.mock.calls[0]?.[1]?.[0]).toBe(file);
+    expect(file.name).toBe(name);
+    expect(useChatStore.getState().queuedMessages).toEqual([
+      expect.objectContaining({ text, files: [file], conversationId: CONV }),
+    ]);
+    const requeuedStrip = screen.getByTestId("composer-queued-strip");
+    expect(requeuedStrip).toHaveTextContent(displayName);
+    if (text) expect(requeuedStrip).toHaveTextContent(text);
   });
 
   it("preserves a queued quoted reply and its attachments on re-send", () => {
