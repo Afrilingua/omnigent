@@ -6766,19 +6766,35 @@ def _measured_prefix_bytes(transcript_path: Path) -> int | None:
         return None
 
 
-def _native_terminal_start_error_payload(exc: BaseException, runtime_name: str) -> dict[str, str]:
+def _native_terminal_start_error_payload(
+    exc: BaseException, runtime_name: str, *, session_id: str
+) -> dict[str, str]:
     """
     Build the structured error payload for a native terminal start failure.
 
     :param exc: Exception raised by the native terminal creation path,
         e.g. ``ImportError("Native Codex requires the 'codex' CLI on PATH.")``.
     :param runtime_name: Human-readable runtime name, e.g. ``"Codex"``.
+    :param session_id: Session whose terminal failed, which may be a runner's child.
     :returns: ``{"code": ..., "message": ...}`` payload for SSE and
         JSON error responses. Known actionable configuration errors surface
         their safe message directly; other causes point to the runner log.
     """
     error_id = f"err_{uuid.uuid4().hex}"
-    if isinstance(exc, OmnigentError) and exc.code == ErrorCode.SESSION_AGENT_MISSING:
+    missing_agent = isinstance(exc, OmnigentError) and exc.code == ErrorCode.SESSION_AGENT_MISSING
+    extra = debug_event(
+        "native_terminal_start_failed",
+        session_id=session_id,
+        error_id=error_id,
+        runtime=runtime_name,
+        code=ErrorCode.SESSION_AGENT_MISSING
+        if missing_agent
+        else _NATIVE_TERMINAL_START_FAILED_CODE,
+        exception_type=type(exc).__name__,
+        exception_cause_type=type(exc.__cause__).__name__ if exc.__cause__ is not None else None,
+        cause_code=exc.code if isinstance(exc, OmnigentError) else None,
+    )
+    if missing_agent:
         # Expected session-lifecycle condition: the session's agent was deleted
         # or rebound, so its bundle no longer resolves. This is not a
         # terminal-startup defect — log it without a stack and surface a
@@ -6790,7 +6806,7 @@ def _native_terminal_start_error_payload(exc: BaseException, runtime_name: str) 
             runtime_name,
             error_id,
             exc,
-            extra={"session_id": runner_primary_session_id(), "error_id": error_id},
+            extra=extra,
         )
         return {
             "code": ErrorCode.SESSION_AGENT_MISSING,
@@ -6807,7 +6823,7 @@ def _native_terminal_start_error_payload(exc: BaseException, runtime_name: str) 
         error_id,
         exc,
         exc_info=exc,
-        extra={"session_id": runner_primary_session_id(), "error_id": error_id},
+        extra=extra,
     )
     from omnigent.harnesses.claude_native.bridge import ClaudeNativeHookInterpreterMismatchError
 
@@ -6864,7 +6880,7 @@ def _publish_native_terminal_start_error(
     :returns: The structured error payload that was published on the
         status event.
     """
-    error = _native_terminal_start_error_payload(exc, runtime_name)
+    error = _native_terminal_start_error_payload(exc, runtime_name, session_id=session_id)
     publish_event(
         session_id,
         {
@@ -6876,18 +6892,23 @@ def _publish_native_terminal_start_error(
     return error
 
 
-def _native_terminal_start_error_response(exc: BaseException, runtime_name: str) -> JSONResponse:
+def _native_terminal_start_error_response(
+    exc: BaseException, runtime_name: str, *, session_id: str
+) -> JSONResponse:
     """
     Return a structured JSON error for native terminal ensure failures.
 
     :param exc: Exception raised by terminal auto-create.
     :param runtime_name: Human-readable runtime name, e.g. ``"Codex"``.
+    :param session_id: Session whose terminal ensure failed.
     :returns: HTTP 500 response with an ``error`` object carrying the
         real failure message.
     """
     return JSONResponse(
         status_code=500,
-        content={"error": _native_terminal_start_error_payload(exc, runtime_name)},
+        content={
+            "error": _native_terminal_start_error_payload(exc, runtime_name, session_id=session_id)
+        },
     )
 
 
@@ -8915,7 +8936,9 @@ async def _ensure_native_terminal(
                     ctx.session_id,
                     extra={"session_id": ctx.session_id},
                 )
-            return _native_terminal_start_error_response(exc, agent.display_name)
+            return _native_terminal_start_error_response(
+                exc, agent.display_name, session_id=ctx.session_id
+            )
         return respond(view)
 
 
