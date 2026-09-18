@@ -76,6 +76,7 @@ import {
   CLAUDE_NATIVE_EFFORTS,
   PI_NATIVE_EFFORTS,
   ConfigRow,
+  EFFORT_SELECT_NONE,
   EFFORT_UNAVAILABLE_PLACEHOLDER,
   MODEL_SELECT_DEFAULT,
   MODEL_SELECT_SMART,
@@ -3545,8 +3546,9 @@ export function NewChatLandingScreen() {
   };
   const selectPickerEffort = (effort: string) => {
     if (!selectedNativeHarness) return;
-    setPickedEffort(effort);
-    rememberPickerOptions(selectedNativeHarness, { effort });
+    const picked = effort === EFFORT_SELECT_NONE ? "" : effort;
+    setPickedEffort(picked);
+    rememberPickerOptions(selectedNativeHarness, { effort: picked });
   };
   // Devin Fusion: the composed `fusion-…` variant id IS the model, so it lands
   // in pickedModel with no separate effort (the lead effort is baked in).
@@ -3674,14 +3676,24 @@ export function NewChatLandingScreen() {
               ? {
                   testId: "new-chat-landing-agent-efforts",
                   header: selectedNativeHarness === "pi-native" ? "Thinking level" : "Effort",
-                  choices: pickerEffortOptions.map((option) => ({
-                    key: option.value,
-                    label: option.label,
-                    checked: !routingOn && pickedEffort === option.value,
-                    disabled: routingOn,
-                    onSelect: () => selectPickerEffort(option.value),
-                    testId: `new-chat-landing-agent-effort-${option.value}`,
-                  })),
+                  choices: [
+                    {
+                      key: "__default__",
+                      label: "Default",
+                      checked: !routingOn && pickedEffort === "",
+                      disabled: routingOn,
+                      onSelect: () => selectPickerEffort(EFFORT_SELECT_NONE),
+                      testId: "new-chat-landing-agent-effort-default",
+                    },
+                    ...pickerEffortOptions.map((option) => ({
+                      key: option.value,
+                      label: option.label,
+                      checked: !routingOn && pickedEffort === option.value,
+                      disabled: routingOn,
+                      onSelect: () => selectPickerEffort(option.value),
+                      testId: `new-chat-landing-agent-effort-${option.value}`,
+                    })),
+                  ],
                 }
               : undefined
           }
@@ -3834,7 +3846,7 @@ export function NewChatLandingScreen() {
   // Seed the harness's knobs from the user's last picks when the selected
   // harness changes (including the first mount), so a returning user starts a
   // new session on the options they used last for that harness instead of the
-  // default. Keyed on the harness so an in-session edit isn't clobbered on
+  // default. Keyed on the harness so an in-composer edit isn't clobbered on
   // re-render — only a harness switch reseeds.
   useEffect(() => {
     if (!selectedNativeHarness) return;
@@ -5201,7 +5213,7 @@ export function NewChatLandingScreen() {
           localConv = beginLocalConversation(initialPrompt, files, provisional, localProject, {
             // Seed the temp session with the NORMALIZED create identity so the
             // optimistic composer shows the model/effort/harness/routing being
-            // created — not the previous session's sticky state (#7039).
+            // created, not state projected from the previously active session.
             modelOverride: normalizedModelOverride,
             llmModel: resolvedDefaultModel,
             reasoningEffort: normalizedReasoningEffort,
@@ -5302,9 +5314,8 @@ export function NewChatLandingScreen() {
                           )?.args ?? [])
                         : undefined,
             // Model + reasoning effort, persisted on the session row before
-            // the runner launches. Claude, Codex, and Pi read model_override at
-            // terminal launch; an unselected ("") knob is omitted so the
-            // harness keeps its own configured/default model.
+            // the runner launches. An unselected ("") knob is omitted so the
+            // harness keeps its own configured/default value.
             model_override: normalizedModelOverride ?? undefined,
             reasoning_effort: normalizedReasoningEffort ?? undefined,
             cost_control_mode_override: costControlOverride,
