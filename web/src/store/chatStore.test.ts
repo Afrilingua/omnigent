@@ -2379,6 +2379,46 @@ describe("chatStore — send (first-send ordering)", () => {
     });
   });
 
+  it("routes a send failure to opts.onError and suppresses the default error block + draft", async () => {
+    // A caller that owns its failure UX (e.g. a codex `/side`, whose error
+    // belongs to the side-chat tab) passes onError. The failure must reach it,
+    // and the default surfacing — a parent error block and a restored
+    // failedSendDraft — must be suppressed so the parent chat stays clean.
+    useChatStore.setState({
+      conversationId: "conv_existing",
+      abortController: new AbortController(),
+      status: "idle",
+      sessionStatus: "running",
+      blocks: [],
+      pendingUserMessages: [],
+      failedSendDraft: null,
+    });
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input);
+      if (url.endsWith("/v1/sessions/conv_existing/events")) {
+        return mockResponse(
+          { error: { code: "invalid_input", message: "host too old for side chat" } },
+          { ok: false, status: 400 },
+        );
+      }
+      return defaultFetchHandler(input, init);
+    });
+
+    const seen: string[] = [];
+    await useChatStore.getState().send("/side why", "agent_xyz", undefined, {
+      onError: (message) => seen.push(message),
+    });
+
+    const state = useChatStore.getState();
+    expect(seen).toEqual(["host too old for side chat"]);
+    // Default surfacing suppressed: no error block, no restored draft.
+    expect(state.blocks.filter((b) => b.type === "error")).toHaveLength(0);
+    expect(state.failedSendDraft).toBeNull();
+    // Bubble still rolled back and status still settled.
+    expect(state.pendingUserMessages).toEqual([]);
+    expect(state.status).toBe("idle");
+  });
+
   it("settles optimistic pending state when an input policy denies the send", async () => {
     useChatStore.setState({
       conversationId: "conv_existing",
@@ -6433,6 +6473,34 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
       expect(after.status).not.toBe("streaming");
       // armed, so the fork's session.created moves the user into it
       expect(after.awaitingSideChatFor).toBe("conv_codex_side");
+    });
+
+    it("disarms the latch when the /side send is refused", async () => {
+      // Old host: the server refuses `/side` (400). The latch armed at send
+      // time must clear, or the next ordinary sub-agent's session.created under
+      // this parent would wrongly open as a side-chat tab.
+      seedSession("conv_codex_side_fail", []);
+      await useChatStore.getState().switchTo("conv_codex_side_fail");
+      useChatStore.setState({ sessionHarness: "codex-native", awaitingSideChatFor: null });
+      fetchMock.mockImplementation((input, init) => {
+        const url = String(input);
+        if (url.endsWith("/v1/sessions/conv_codex_side_fail/events")) {
+          return mockResponse(
+            { error: { code: "invalid_input", message: "host too old for side chat" } },
+            { ok: false, status: 400 },
+          );
+        }
+        return defaultFetchHandler(input, init);
+      });
+
+      const seen: string[] = [];
+      await useChatStore
+        .getState()
+        .send("/side why", "agent_xyz", undefined, { onError: (m) => seen.push(m) });
+
+      expect(seen).toEqual(["host too old for side chat"]);
+      // Latch disarmed → a later ordinary child under this parent won't open a tab.
+      expect(useChatStore.getState().awaitingSideChatFor).toBeNull();
     });
 
     it("still bubbles and latches for an ordinary message", async () => {
