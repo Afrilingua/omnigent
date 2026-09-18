@@ -1791,7 +1791,7 @@ def mark_subagent_work_started(child_session_id: str) -> _SubagentWorkEntry | No
     entry = _subagent_work_by_child.get(child_session_id)
     if entry is None:
         return None
-    if entry.status == "launching":
+    if entry.status in {"launching", "waiting"}:
         entry.status = "running"
     return entry
 
@@ -2032,31 +2032,48 @@ async def _recover_subagent_results_from_server(
         status = child.get("current_task_status")
         if not isinstance(child_id, str) or not isinstance(status, str):
             continue
-        if status not in _SUBAGENT_TERMINAL_STATUSES:
+        error = child.get("last_task_error")
+        interrupted = status == "in_progress" or (
+            status == "failed"
+            and isinstance(error, dict)
+            and error.get("code") in {"runner_disconnected", "runner_failed_to_start"}
+        )
+        if status not in _SUBAGENT_TERMINAL_STATUSES and not interrupted:
             continue
-        if (
-            get_subagent_work(child_id) is not None
-            or child_id in _drained_delivered_subagent_children
+        existing = get_subagent_work(child_id)
+        if (existing is not None and existing.status != "waiting") or (
+            child_id in _drained_delivered_subagent_children
         ):
             continue
         labels = child.get("labels")
         dispatch_id = undelivered_subagent_dispatch_id(labels if isinstance(labels, dict) else {})
-        if dispatch_id is None:
+        if dispatch_id is None or (existing is not None and existing.work_id != dispatch_id):
             continue
         output: str | None = None
         if status == "failed":
             error = child.get("last_task_error")
             message = error.get("message") if isinstance(error, dict) else None
             output = message if isinstance(message, str) else None
-        else:
+        elif not interrupted:
             output = await _fetch_latest_assistant_text(server_client, child_id)
-        entry = register_subagent_work(
+        # A forwarded completion or newer dispatch may arrive during the history read.
+        if (
+            get_subagent_work(child_id) is not existing
+            or (existing is not None and existing.status != "waiting")
+            or child_id in _drained_delivered_subagent_children
+        ):
+            continue
+        entry = existing or register_subagent_work(
             parent_session_id=parent_id,
             child_session_id=child_id,
             agent=str(child.get("tool") or child.get("agent_name") or "sub-agent"),
             title=str(child.get("session_name") or ""),
             work_id=dispatch_id,
         )
+        if interrupted:
+            # This dispatch already existed; a local launch timeout cannot judge it.
+            entry.status = "waiting"
+            continue
         ack = mark_subagent_work_terminal(child_id, status=status, output=output)
         if ack.delivered_now:
             schedule_wake(entry)
@@ -2253,6 +2270,7 @@ async def run_subagent_launch_reaper(
     *,
     interval_s: float = SUBAGENT_LAUNCH_REAP_INTERVAL_S,
     mark_terminal: MarkSubagentTerminalAndWake | None = None,
+    reconcile_pending: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     """
     Periodically sweep for sub-agent dispatches wedged in ``launching``.
@@ -2264,12 +2282,15 @@ async def run_subagent_launch_reaper(
     :param mark_terminal: Terminal-delivery callback forwarded to each sweep;
         the entrypoint passes the app's wake-scheduling seam so a reaped
         failure wakes the parent, not just its inbox.
+    :param reconcile_pending: Refresh recovered work awaiting remote completion.
     :returns: None.
     """
     while True:
         await asyncio.sleep(interval_s)
         try:
             reap_stalled_subagent_launches(mark_terminal=mark_terminal)
+            if reconcile_pending is not None:
+                await reconcile_pending()
         except Exception:  # noqa: BLE001 — the sweep is a backstop; never die.
             _logger.warning("sub-agent launch reaper sweep failed", exc_info=True)
 
@@ -2903,7 +2924,10 @@ def create_runner_app(
     _session_snapshot_cache: dict[str, _SessionSnapshot] = {}  # session_id → snapshot
     _session_snapshot_locks: dict[str, asyncio.Lock] = {}  # session_id → snapshot fetch lock
     _session_spec_locks: dict[str, asyncio.Lock] = {}  # session_id → spec resolution lock
-    _session_init_tasks: dict[tuple[str, str, str | None], asyncio.Task[JSONResponse]] = {}
+    _session_init_tasks: dict[
+        tuple[str, str, str | None, str | None], asyncio.Task[JSONResponse]
+    ] = {}
+    _recovery_turn_ids: dict[str, set[str]] = {}
     _session_init_envelopes: dict[str, tuple[float, RunnerSessionInitEnvelope]] = {}
     # session_id → canonical reasoning effort, seeded from the session-init
     # snapshot and updated by ``effort_change``. In-process harnesses learn the
@@ -3891,6 +3915,11 @@ def create_runner_app(
             )
         session_id = cast(str, session_id)
         agent_id = cast(str, agent_id)
+        initial_turn_epoch = _turn_bind_epoch.get(session_id)
+        initial_native_activity = resource_registry.session_activity_epoch(session_id)
+        initially_active = session_id in _active_turns or resource_registry.session_turn_is_active(
+            session_id
+        )
 
         # Captured before init's first await: the legacy (no-envelope) context
         # load below probes the server's version over the network, so a reset
@@ -4423,13 +4452,25 @@ def create_runner_app(
         _suppress_recovery = (
             init_context.envelope is not None and init_context.envelope.suppress_recovery_turn
         )
+        recovery_id = (
+            init_context.envelope.recovery_id
+            if init_context.envelope is not None
+            and init_context.envelope.resume_interrupted_turn
+            and not _suppress_recovery
+            else None
+        )
         history: list[_JsonObject]
         if is_native_harness(harness_name):
             await _seed_last_server_item_id(session_id)
             history = []
         else:
             history = await _load_history_as_input(session_id)
-        if history:
+        execution_seen = (
+            initially_active
+            or _turn_bind_epoch.get(session_id) != initial_turn_epoch
+            or resource_registry.session_activity_epoch(session_id) != initial_native_activity
+        )
+        if history and not execution_seen and session_id not in _active_turns:
             _session_histories[session_id] = history
             last = history[-1]
             last_type = last.get("type")
@@ -4439,7 +4480,12 @@ def create_runner_app(
                 or last_type == "function_call"
                 or last_type == "function_call_output"
             )
-            if needs_turn and not _suppress_recovery and session_id not in _active_turns:
+            if (
+                needs_turn
+                and recovery_id is None
+                and not _suppress_recovery
+                and session_id not in _active_turns
+            ):
                 _begin_turn_slot(session_id)
                 _publish_turn_status(session_id, "running")
                 msg_body = {
@@ -4457,6 +4503,47 @@ def create_runner_app(
                     _background_tasks.discard,
                 )
                 _background_tasks.add(_turn_task)
+
+        if recovery_id is not None and recovery_id not in _recovery_turn_ids.get(
+            session_id, set()
+        ):
+            # Active execution, including a newer message, takes precedence over
+            # automatic continuation. Initialization alone cannot consume it.
+            if (
+                not execution_seen
+                and session_id not in _active_turns
+                and not resource_registry.session_turn_is_active(session_id)
+            ):
+                if is_native_harness(harness_name):
+                    _session_histories[session_id] = []
+                _begin_turn_slot(session_id)
+                _publish_turn_status(session_id, "running")
+                recovery_body: _JsonObject = {
+                    "agent_id": agent_id,
+                    "model": body.get("model", agent_id),
+                    "browser_renderer_available": False,
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                "Your runner was interrupted while this task was active. "
+                                "Continue the existing task from its current state. "
+                                "Check any interrupted operation's outcome before repeating it."
+                            ),
+                        }
+                    ],
+                }
+                if not is_native_harness(harness_name):
+                    _session_histories.setdefault(session_id, []).append(
+                        {"type": "message", "role": "user", "content": recovery_body["content"]}
+                    )
+                recovery_task = asyncio.create_task(
+                    _run_turn_bg(recovery_body, session_id), name=f"turn-recover-{session_id}"
+                )
+                _active_turns[session_id] = recovery_task
+                recovery_task.add_done_callback(_background_tasks.discard)
+                _background_tasks.add(recovery_task)
+            _recovery_turn_ids.setdefault(session_id, set()).add(recovery_id)
 
         status = "running" if session_id in _active_turns else "idle"
         return JSONResponse(
@@ -4497,10 +4584,15 @@ def create_runner_app(
         if not isinstance(session_id, str) or not isinstance(agent_id, str):
             return await _initialize_session(body)
         sub_agent_name = body.get("sub_agent_name")
+        try:
+            envelope = parse_runner_session_init_envelope(body)
+        except ValueError:
+            return await _initialize_session(body)
         key = (
             session_id,
             agent_id,
             sub_agent_name if isinstance(sub_agent_name, str) else None,
+            envelope.recovery_id if envelope is not None else None,
         )
         task = _session_init_tasks.get(key)
         if task is None:
@@ -4671,6 +4763,7 @@ def create_runner_app(
         _live_response_id.pop(session_id, None)
         # Clear all desync/turn state so a recreated same-id session starts clean.
         _turn_bind_epoch.pop(session_id, None)
+        _recovery_turn_ids.pop(session_id, None)
         _desync_terminalized.pop(session_id, None)
         _desynced_sessions.discard(session_id)
         _required_terminal_exit_errors.pop(session_id, None)
@@ -5272,10 +5365,11 @@ def create_runner_app(
 
         The parent inbox is a process-local queue, so a result queued before
         a restart but not yet drained would otherwise vanish. Runs once per
-        parent per process; a scan that fails on a server read is retried
-        before the next ``sys_read_inbox`` drain. The inbox is created here
-        when missing: after a reconnect the server can dispatch a pending
-        message before it re-initializes the session, and that turn's drain
+        parent per process; pending recovered work is refreshed by the periodic
+        sweep. A failed server read is retried before the next ``sys_read_inbox``
+        drain. The inbox is created here when missing: after a reconnect the
+        server can dispatch a pending message before it re-initializes the session,
+        and that turn's drain
         must still see the recovered results. Results acknowledged while this
         parent had no inbox here are handed over first, on every call.
 
@@ -5351,6 +5445,21 @@ def create_runner_app(
         await asyncio.shield(_start_subagent_recovery(parent_id))
 
     app.state.recover_undrained_subagent_results = _recover_undrained_subagent_results
+
+    async def _reconcile_pending_subagent_results() -> None:
+        """Refresh only recovered work with no local execution or completion edge."""
+        parents = {
+            entry.parent_session_id
+            for entry in list(_subagent_work_by_child.values())
+            if entry.status == "waiting"
+        }
+        for parent_id in parents:
+            if not any(entry.status == "waiting" for entry in list_subagent_work(parent_id)):
+                continue
+            _subagent_recovery_done.discard(parent_id)
+            await _recover_undrained_subagent_results(parent_id)
+
+    app.state.reconcile_pending_subagent_results = _reconcile_pending_subagent_results
 
     def _note_session_harness_override(conv_id: str, harness_override: str | None) -> None:
         """Record the harness a session was forwarded, so reads match the run.

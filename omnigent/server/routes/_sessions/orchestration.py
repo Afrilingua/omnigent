@@ -4266,16 +4266,6 @@ async def _ensure_runner_session_initialized(
         # via the same warning path rather than silently forwarding into a
         # half-initialized runner.
         resp.raise_for_status()
-        await _publish_runner_recovered_status(session_id, conversation_store)
-        try:
-            payload = resp.json()
-        except ValueError:
-            return False
-        return bool(
-            isinstance(payload, dict)
-            and payload.get("session_init_protocol_version") == 2
-            and payload.get("terminal_ready") is True
-        )
     except (httpx.HTTPError, ConnectionError) as exc:
         _logger.warning(
             "Session-init handshake to runner failed for session %s; "
@@ -4290,6 +4280,31 @@ async def _ensure_runner_session_initialized(
                 code=ErrorCode.RUNNER_UNAVAILABLE,
             ) from exc
         return False
+
+    await _publish_runner_recovered_status(session_id, conversation_store)
+    from omnigent.server.child_session_recovery import (
+        restore_active_children,
+        schedule_child_restoration,
+    )
+
+    # Legacy callers leave descendant restoration to the runner-connect hook.
+    if initializer is not None:
+        if suppress_recovery_turn and not require_success:
+            schedule_child_restoration(conv, runner_client, conversation_store, initializer)
+        else:
+            await _ensure_runner_relay_ready(
+                session_id, conv.runner_id, runner_client, conversation_store
+            )
+            await restore_active_children(conv, runner_client, conversation_store, initializer)
+    try:
+        payload = resp.json()
+    except ValueError:
+        return False
+    return bool(
+        isinstance(payload, dict)
+        and payload.get("session_init_protocol_version") == 2
+        and payload.get("terminal_ready") is True
+    )
 
 
 def _is_native_terminal_session(conv: Conversation) -> bool:
