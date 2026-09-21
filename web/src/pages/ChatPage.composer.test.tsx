@@ -3772,6 +3772,7 @@ describe("Composer sub-agent tray", () => {
     // that some tray exists.
     expect(screen.getByText("check-account-eligibility")).toBeTruthy();
     expect(screen.getByText(/Chatting with sub-agent/)).toBeTruthy();
+    expect(screen.getByTestId("composer-workspace-controls")).not.toHaveClass("rounded-t-none");
   });
 
   // The sub-agent tray sits directly above the workspace bar, sharing its
@@ -3788,6 +3789,23 @@ describe("Composer sub-agent tray", () => {
     render(<Composer {...composerProps()} />);
     const bar = document.querySelector('[data-testid="composer-workspace-controls"]');
     expect(bar?.className).not.toContain("rounded-t-none");
+  });
+
+  it("removes the workspace bar's inner arc when the queue tray is docked above it", () => {
+    setComposerState({
+      conversationId: "conv_test",
+      skills: [],
+      queuedMessages: [{ queueId: "q_1", text: "held follow-up", conversationId: "conv_test" }],
+    });
+    renderWithTooltips(<Composer {...composerProps()} />);
+    expect(screen.getByTestId("composer-workspace-controls")).toHaveClass(
+      "rounded-t-none",
+      "pl-2.5",
+      "border-t-0",
+      "border-border/50",
+      "before:inset-x-4",
+      "before:h-px",
+    );
   });
 });
 
