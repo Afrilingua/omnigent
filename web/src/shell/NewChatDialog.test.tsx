@@ -5400,7 +5400,7 @@ describe("NewChatLandingScreen", () => {
     const menu = screen.getByTestId("new-chat-landing-permission-menu");
     expect(
       within(menu)
-        .getAllByRole("menuitem")
+        .getAllByRole("menuitemradio")
         .map((item) => item.textContent),
     ).toEqual(["Default", "Full access", "Read only", "Bypass approvals & sandbox"]);
   });
@@ -7819,7 +7819,7 @@ describe("NewChatLandingScreen agent picker + Edit settings", () => {
   it("does not change permissions when the hand menu is dismissed without a selection", () => {
     renderLanding();
     openPermissions();
-    fireEvent.pointerMove(screen.getByRole("menuitem", { name: "Plan" }));
+    fireEvent.pointerMove(screen.getByRole("menuitemradio", { name: "Plan" }));
     closeMenu();
     expect(screen.getByTestId("new-chat-landing-permission-chip")).toHaveAccessibleName(
       "Permission mode: Manual",
@@ -8217,7 +8217,7 @@ describe("NewChatLandingScreen smart routing", () => {
     renderLanding({ smart_routing_enabled: true });
     openPermissions();
     expect(screen.queryByTestId("new-chat-landing-agent-models")).toBeNull();
-    expect(screen.getByRole("menuitem", { name: "Plan" })).toBeVisible();
+    expect(screen.getByRole("menuitemradio", { name: "Plan" })).toBeVisible();
     expect(screen.queryByRole("menuitem", { name: "Smart Routing" })).toBeNull();
   });
 

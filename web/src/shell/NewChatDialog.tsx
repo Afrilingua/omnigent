@@ -6543,7 +6543,9 @@ export function NewChatLandingScreen() {
                                 ? cursorExecMode
                                 : selectedNativeHarness === "antigravity-native"
                                   ? agySkipMode
-                                  : undefined
+                                  : selectedNativeHarness === "devin-native"
+                                    ? devinPermissionMode
+                                    : undefined
                         }
                         loading={pickerLoading}
                         interactiveWhileLoading={interactiveWhileLoading}
