@@ -15,6 +15,8 @@ from omnigent.runner.session_init_protocol import build_runner_session_init_payl
 
 if TYPE_CHECKING:
     from omnigent.runner.transports.ws_tunnel.registry import TunnelRegistry
+    from omnigent.stores.conversation_store import ConversationStore
+    from omnigent.stores.file_store import FileStore
 
 
 def runner_inference_verified(conversation: Conversation, response: httpx.Response) -> bool:
@@ -36,9 +38,18 @@ _logger = logging.getLogger(__name__)
 class RunnerSessionInitializer:
     """Share initialization readiness within one runner tunnel generation."""
 
-    def __init__(self, registry: TunnelRegistry, *, server_version: str) -> None:
+    def __init__(
+        self,
+        registry: TunnelRegistry,
+        *,
+        server_version: str,
+        conversation_store: ConversationStore | None = None,
+        file_store: FileStore | None = None,
+    ) -> None:
         self._registry = registry
         self._server_version = server_version
+        self._conversation_store = conversation_store
+        self._file_store = file_store
         self._tasks: dict[
             tuple[str, int, str, str, str | None, bool],
             asyncio.Task[httpx.Response],
@@ -74,24 +85,48 @@ class RunnerSessionInitializer:
         )
         task = self._tasks.get(key)
         if task is None:
-            task = asyncio.create_task(
-                self._post_initialize(
+            payload = build_runner_session_init_payload(
+                conversation,
+                server_version=self._server_version,
+                suppress_recovery_turn=suppress_recovery_turn,
+                resume_interrupted_turn=resume_interrupted_turn,
+                recovery_id=(
+                    self._recovery_ids.setdefault(key, uuid4().hex)
+                    if resume_interrupted_turn
+                    else None
+                ),
+            )
+
+            async def post_session_init() -> httpx.Response:
+                if self._conversation_store is not None and self._file_store is not None:
+                    from omnigent.server.routes._sessions.helpers import (
+                        _filesystem_attachment_in_history,
+                        require_filesystem_attachment_runtime,
+                    )
+
+                    attachment = await asyncio.to_thread(
+                        _filesystem_attachment_in_history,
+                        conversation.id,
+                        self._conversation_store,
+                        self._file_store,
+                    )
+                    if attachment is not None:
+                        require_filesystem_attachment_runtime(
+                            host_id=None,
+                            runner_id=runner_id,
+                            host_registry=None,
+                            tunnel_registry=self._registry,
+                        )
+                return await self._post_initialize(
                     runner_client,
                     session_id=conversation.id,
                     runner_id=runner_id,
-                    payload=build_runner_session_init_payload(
-                        conversation,
-                        server_version=self._server_version,
-                        suppress_recovery_turn=suppress_recovery_turn,
-                        resume_interrupted_turn=resume_interrupted_turn,
-                        recovery_id=(
-                            self._recovery_ids.setdefault(key, uuid4().hex)
-                            if resume_interrupted_turn
-                            else None
-                        ),
-                    ),
+                    payload=payload,
                     timeout=timeout,
-                ),
+                )
+
+            task = asyncio.create_task(
+                post_session_init(),
                 name=f"runner-session-init-{conversation.id}",
             )
             self._tasks[key] = task
