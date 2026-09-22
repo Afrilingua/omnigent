@@ -5002,6 +5002,15 @@ def claude_pane_ready(bridge_dir: Path) -> bool:
     return _claude_prompt_rendered(pane)
 
 
+def claude_pane_text_ready(pane: str) -> bool:
+    """Recognize input readiness for logging without capturing another pane."""
+    if _MODEL_PICKER_OPEN_HINT in pane:
+        return False
+    if any(text in pane for text in _CONFIRM_DIALOG_HINTS):
+        return False
+    return _claude_prompt_rendered(pane)
+
+
 def _restore_occupied_input(socket_path: str, tmux_target: str) -> None:
     """
     Dismiss a terminal-opened surface occupying Claude's input box.
