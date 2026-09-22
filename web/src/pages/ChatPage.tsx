@@ -3698,12 +3698,17 @@ function ComposerImpl(
             showWorktree={composerGit.isWorktree === true}
           />
           <div className="ml-auto flex min-w-0 shrink-0 items-center gap-1">
+            <div
+              data-testid="composer-task-indicators"
+              className="flex items-center gap-0 empty:hidden"
+            >
+              <BackgroundTaskIndicator />
+              <SubagentTaskIndicator conversationId={conversationId} />
+            </div>
             <ComposerContextRing
               contextWindow={composerContextWindow}
               tokensUsed={composerTokensUsed}
             />
-            <BackgroundTaskIndicator />
-            <SubagentTaskIndicator conversationId={conversationId} />
           </div>
         </ComposerWorkspaceBar>
       </div>

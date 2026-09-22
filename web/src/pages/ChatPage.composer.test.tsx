@@ -2184,7 +2184,7 @@ describe("Composer shared visible controls", () => {
     expect(pr.compareDocumentPosition(worktree) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
   });
 
-  it("mounts sub-agent work after context and background indicators with navigation", () => {
+  it("mounts task indicators before the context ring with sub-agent navigation", () => {
     useChatStore.setState({
       conversationId: "conv_parent",
       contextWindow: 100_000,
@@ -2218,15 +2218,18 @@ describe("Composer shared visible controls", () => {
     );
 
     const workspace = screen.getByTestId("composer-workspace-controls");
+    const taskIndicators = within(workspace).getByTestId("composer-task-indicators");
     const context = within(workspace).getByTestId("composer-context-ring");
     const background = within(workspace).getByTestId("background-task-pill");
     const subagent = within(workspace).getByTestId("subagent-task-pill");
-    expect(context.compareDocumentPosition(background) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(
-      0,
-    );
     expect(
       background.compareDocumentPosition(subagent) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).not.toBe(0);
+    expect(subagent.compareDocumentPosition(context) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(
+      0,
+    );
+    expect(taskIndicators).toHaveClass("gap-0");
+    expect(context.parentElement).toHaveClass("gap-1");
     expect(childSessionsArgsSpy).toHaveBeenCalledWith("conv_parent");
 
     fireEvent.click(subagent);
