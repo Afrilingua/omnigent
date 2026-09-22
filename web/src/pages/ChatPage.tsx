@@ -226,6 +226,7 @@ import { ComposerWorkspaceStatus } from "@/components/composer/ComposerWorkspace
 import { ComposerPrLink } from "@/components/composer/ComposerPrLink";
 import { ComposerContextRing } from "@/components/composer/ComposerContextRing";
 import { useComposerGitStatus } from "@/hooks/useComposerGitStatus";
+import { composerContextFromLabels } from "@/lib/composerContextAdapters";
 import {
   compactModelTriggerLabel,
   formatStatusModelLabel,
@@ -2590,7 +2591,16 @@ function ComposerImpl(
     () => setPickerOpenNonce((n) => n + 1),
     showModels && codexModelOptions.length > 0 && !isReadOnly && !unreachable && !configBusy,
   );
-  const composerWorkspace = composerSession?.workspace;
+  const hydratedComposerContext = useMemo(
+    () => composerContextFromLabels(composerSession?.labels),
+    [composerSession?.labels],
+  );
+  const sessionWorkspace = composerSession?.workspace;
+  const composerWorkspace = sessionWorkspace?.trim()
+    ? sessionWorkspace
+    : hydratedComposerContext.workingDirectory.kind === "selected"
+      ? hydratedComposerContext.workingDirectory.path
+      : undefined;
   // Live workspace/branch/PR status for the workspace bar (lane-3 shared hook):
   // the branch comes from the host's `git worktree list`, never a PR head.
   const composerGit = useComposerGitStatus({
@@ -3685,9 +3695,7 @@ function ComposerImpl(
             branch={composerGit.branch}
             branchState={composerGit.branchState}
             creationBranch={composerGit.creationBranch}
-            showWorktree={
-              composerGit.githubState === "ready" && composerGit.repoNameWithOwner !== null
-            }
+            showWorktree={composerGit.isWorktree === true}
           />
           <div className="ml-auto flex min-w-0 shrink-0 items-center gap-1">
             <ComposerContextRing

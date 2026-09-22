@@ -1,4 +1,5 @@
 import { useLoadedConversations } from "@/hooks/useSidebarData";
+import { useComposerContext } from "@/hooks/useComposerContext";
 import {
   HarnessPicker,
   HarnessPickerEntry,
@@ -90,6 +91,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { authenticatedFetch, getCurrentUserId, resolveIdentity } from "@/lib/identity";
 import { backgroundSessionTitlesRequestHeaders } from "@/lib/backgroundSessionTitlesPreferences";
 import { fetchGithubBranches, fetchGithubRepos, type GithubRepo } from "@/lib/githubIntegration";
+import { composerContextToLabels } from "@/lib/composerContextAdapters";
 import { randomUUID } from "@/lib/randomUUID";
 import { readSubmitWithModEnter } from "@/lib/composerSendShortcutPreferences";
 import { validateAttachments } from "@/lib/attachments";
@@ -1504,15 +1506,36 @@ export function AgentHarnessPicker({
   const triggerEffort = triggerDetails.find(
     (detail) => detail.label === "Effort" || detail.label === "Thinking level",
   );
+  const selectedEntry = [...harnessEntries, ...agentEntries].find(
+    (agent) => agent.id === effectiveAgentId,
+  );
+  const selectedReadiness = harnessReadinessOnHost(selectedEntry?.harness, host);
+  const selectedUnavailable =
+    selectedEntry != null && !selectedReadiness.selectable && selectedReadiness.fallbackRelevant;
+  const selectedWarningMessage = selectedUnavailable
+    ? harnessWarningMessage(
+        selectedEntry.display_name,
+        host?.name,
+        selectedReadiness.reason,
+        selectedEntry.harness,
+      )
+    : null;
   const triggerModelText = triggerModel ? compactModelTriggerLabel(triggerModel.value) : "";
   const triggerEffortText = triggerEffort ? compactModelTriggerLabel(triggerEffort.value) : "";
-  const visibleModelText = triggerModelText === "Default" ? "Models unavailable" : triggerModelText;
+  const visibleModelText = selectedUnavailable
+    ? ""
+    : triggerModelText === "Default"
+      ? "Models unavailable"
+      : triggerModelText;
   const visibleEffortText =
     triggerEffortText === "Default" || triggerEffortText === "—" ? "" : triggerEffortText;
   const triggerAccessibleDetails = triggerDetails
     .map((detail) => `${detail.label} ${compactModelTriggerLabel(detail.value)}`)
     .join(", ");
-  const triggerAccessibleName = [hasAgents ? agentLabel : "No agents", triggerAccessibleDetails]
+  const triggerAccessibleName = [
+    hasAgents ? agentLabel : "No agents",
+    selectedUnavailable ? "unavailable" : triggerAccessibleDetails,
+  ]
     .filter(Boolean)
     .join(", ");
   const triggerText = triggerSdk
@@ -1522,11 +1545,9 @@ export function AgentHarnessPicker({
   const triggerSecondaryText = triggerSdk
     ? compactModelTriggerLabel(triggerSdk.value)
     : visibleEffortText;
-  const selectedEntry = [...harnessEntries, ...agentEntries].find(
-    (agent) => agent.id === effectiveAgentId,
-  );
   const previewOnly = loading && !interactiveWhileLoading;
   const cachedPreview = previewOnly ? readNewChatPickerCache(cacheKey) : null;
+  const visibleCachedPreview = selectedUnavailable ? null : cachedPreview;
   const resolvedPreview = useMemo<NewChatPickerPreview | null>(
     () =>
       selectedEntry && hasAgents && visibleModelText !== "Models unavailable"
@@ -1614,8 +1635,13 @@ export function AgentHarnessPicker({
     const editable = selectedConfigContent !== undefined && (isEntryConfigurable?.(agent) ?? true);
     const readiness = harnessReadinessOnHost(agent.harness, host);
     const unavailable = !readiness.selectable && readiness.fallbackRelevant;
-    const broken = readiness.state === "broken";
     const warning = harnessWarningBadgeText(readiness.reason, collapsedBadge);
+    const warningMessage = harnessWarningMessage(
+      agent.display_name,
+      host?.name,
+      readiness.reason,
+      agent.harness,
+    );
     return (
       <HarnessPickerEntry
         key={agent.id}
@@ -1641,45 +1667,22 @@ export function AgentHarnessPicker({
         summary={summary}
         description={blurb}
         active={active}
-        editable={editable}
+        editable={editable && !unavailable}
         isMobile={isMobile}
-        disabled={broken}
+        disabled={unavailable}
+        tooltip={unavailable ? warningMessage : undefined}
+        tooltipTestId={unavailable ? `new-chat-landing-agent-tooltip-${agent.id}` : undefined}
         summaryTestId={`new-chat-landing-agent-summary-${agent.id}`}
         editTestId={`new-chat-landing-agent-config-${agent.id}`}
         warning={
           unavailable && (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <span
-                  aria-label={warning}
-                  data-testid={`new-chat-landing-agent-warning-${agent.id}`}
-                  className="flex size-4 shrink-0 items-center justify-center text-amber-700 dark:text-amber-300"
-                >
-                  <TriangleAlertIcon className="size-3.5" aria-hidden="true" />
-                </span>
-              </TooltipTrigger>
-              <TooltipContent
-                className={
-                  broken
-                    ? "w-72 max-w-[calc(100vw-2rem)] flex-col items-start gap-1 rounded-lg border border-border bg-popover p-3 text-popover-foreground shadow-menu"
-                    : undefined
-                }
-              >
-                {broken ? (
-                  <>
-                    <strong className="font-medium">
-                      {readiness.explanation?.label ?? "Harness unavailable"}
-                    </strong>
-                    <span className="text-xs leading-5 text-muted-foreground">
-                      {readiness.explanation?.description ??
-                        "Choose another harness or repair this harness before continuing."}
-                    </span>
-                  </>
-                ) : (
-                  warning
-                )}
-              </TooltipContent>
-            </Tooltip>
+            <span
+              aria-label={warning}
+              data-testid={`new-chat-landing-agent-warning-${agent.id}`}
+              className="flex size-4 shrink-0 items-center justify-center text-amber-700 dark:text-amber-300"
+            >
+              <TriangleAlertIcon className="size-3.5" aria-hidden="true" />
+            </span>
           )
         }
       />
@@ -1791,7 +1794,9 @@ export function AgentHarnessPicker({
   // Structured rows (bold keys, like the session composer's pill) win over
   // prose; either renders as a real tooltip surface, never the unstyled
   // native `title` hover.
-  const triggerTooltipContent = triggerTooltipRows?.length ? (
+  const triggerTooltipContent = selectedWarningMessage ? (
+    <span className="text-xs leading-5 text-popover-foreground">{selectedWarningMessage}</span>
+  ) : triggerTooltipRows?.length ? (
     <ComposerConfigTooltipRows rows={triggerTooltipRows} />
   ) : (
     triggerTooltip || null
@@ -1828,20 +1833,29 @@ export function AgentHarnessPicker({
       trigger={{
         disabled: disabledLabel !== undefined || previewOnly || !hasAgents,
         "aria-busy": loading || undefined,
-        label: disabledLabel ?? cachedPreview?.label ?? triggerAccessibleName,
-        model: disabledLabel ?? cachedPreview?.model ?? triggerText,
+        label: disabledLabel ?? visibleCachedPreview?.label ?? triggerAccessibleName,
+        model: disabledLabel ?? visibleCachedPreview?.model ?? triggerText,
         effort:
-          disabledLabel === undefined ? (cachedPreview?.effort ?? triggerSecondaryText) : undefined,
+          disabledLabel === undefined
+            ? (visibleCachedPreview?.effort ?? triggerSecondaryText)
+            : undefined,
         icon:
-          disabledLabel !== undefined ? undefined : cachedPreview ? (
+          disabledLabel !== undefined ? undefined : selectedUnavailable ? (
+            <span
+              className="flex size-4 shrink-0 items-center justify-center text-amber-700 dark:text-amber-300"
+              data-testid="new-chat-landing-agent-warning"
+            >
+              <TriangleAlertIcon className="size-3.5" aria-hidden="true" />
+            </span>
+          ) : visibleCachedPreview ? (
             <span
               className="flex size-4 shrink-0 items-center justify-center"
               data-testid="new-chat-landing-agent-icon"
             >
-              {cachedPreview.smartRouting ? (
+              {visibleCachedPreview.smartRouting ? (
                 <WandSparklesIcon className="size-4" aria-hidden="true" />
               ) : (
-                <ComposerAgentIcon agent={cachedPreview.agent} />
+                <ComposerAgentIcon agent={visibleCachedPreview.agent} />
               )}
             </span>
           ) : (
@@ -1855,7 +1869,7 @@ export function AgentHarnessPicker({
         testIdPrefix: "new-chat-landing",
         "data-testid": "new-chat-landing-agent-select",
       }}
-      tooltip={disabledLabel ?? cachedPreview?.label ?? triggerTooltipContent}
+      tooltip={disabledLabel ?? visibleCachedPreview?.label ?? triggerTooltipContent}
       tooltipTestId="new-chat-landing-agent-tooltip"
       tooltipVariant="session-info"
       contentAlign={contentAlign}
@@ -4422,6 +4436,36 @@ export function NewChatLandingScreen() {
   // workspace isn't already sitting on that existing worktree.
   const shouldCreateWorktree =
     workspaceIsGit && branchName.trim() !== "" && !startInExistingWorktree;
+  const { state: composerContextState, setState: setComposerContextState } = useComposerContext({
+    workingDirectoryGitState: workspaceIsNonGit ? "not_git" : workspaceIsGit ? "git" : "unknown",
+  });
+  useEffect(() => {
+    setComposerContextState({
+      workingDirectory:
+        workspaceTrimmed === "" ? { kind: "unset" } : { kind: "selected", path: workspaceTrimmed },
+      worktree: startInExistingWorktree
+        ? {
+            kind: "existing",
+            path: activeWorktree!.path,
+            branch: activeWorktree!.branch!,
+          }
+        : shouldCreateWorktree
+          ? {
+              kind: "new",
+              branchName: branchName.trim(),
+              baseBranch: baseBranch.trim() || null,
+            }
+          : { kind: "none" },
+    });
+  }, [
+    activeWorktree,
+    baseBranch,
+    branchName,
+    setComposerContextState,
+    shouldCreateWorktree,
+    startInExistingWorktree,
+    workspaceTrimmed,
+  ]);
   const worktreeVerificationPending =
     worktreesEnabled &&
     !workspaceIsNonGit &&
@@ -5221,6 +5265,7 @@ export function NewChatLandingScreen() {
     submittedRef.current = true;
     try {
       const trimmedBranch = branchName.trim();
+      const composerContextLabels = composerContextToLabels(composerContextState);
       // `shouldCreateWorktree` (component scope): true only when a branch is
       // named and the workspace isn't already an existing worktree. Starting
       // in an existing worktree sends no git opts — the workspace is bound
@@ -5358,8 +5403,12 @@ export function NewChatLandingScreen() {
       // first-class membership (and a label would go stale on project rename).
       const createLabels =
         selectedProject && createProjectId === null
-          ? { ...(baseLabels ?? {}), [PROJECT_LABEL_KEY]: selectedProject }
-          : baseLabels;
+          ? {
+              ...(baseLabels ?? {}),
+              [PROJECT_LABEL_KEY]: selectedProject,
+              ...composerContextLabels,
+            }
+          : { ...(baseLabels ?? {}), ...composerContextLabels };
 
       let data: { id: string };
 
@@ -5370,7 +5419,7 @@ export function NewChatLandingScreen() {
         // (POST /v1/hosts/{id}/runners) to bind the session to a runner, the
         // same way the fork-resume path does.
         const bundle = await buildAgentBundle(pendingAgent);
-        const metadata: Record<string, unknown> = {};
+        const metadata: Record<string, unknown> = { labels: createLabels };
         // A config-seeded workspace is omitted on a `project_id` create so the
         // server default-fills it (same field semantics as the JSON path).
         if (workspaceTrimmed && !workspaceFromProjectConfig) metadata.workspace = workspaceTrimmed;
@@ -5381,7 +5430,6 @@ export function NewChatLandingScreen() {
           // Born-filed: stamp the project's `omni_project` label so a bundled
           // session groups under its project from its first sidebar appearance,
           // same as the JSON path (see `createLabels`).
-          metadata.labels = { [PROJECT_LABEL_KEY]: selectedProject };
         }
         const bundled = await createBundledSession(
           bundle,
