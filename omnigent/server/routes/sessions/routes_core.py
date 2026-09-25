@@ -131,6 +131,7 @@ from omnigent.server.routes._sessions.helpers import (
     _filesystem_attachment_in_history,
     _forward_session_change_to_runner,
     _get_runner_client,
+    _grant_default_public,
     _invalidate_runner_backed_snapshot_state,
     _multipart_missing_detail,
     _native_coding_agent_for_agent,
@@ -873,6 +874,18 @@ def register_core_routes(
                 resp.runner_id = runner_id
                 resp.host_id = launch_host_id
 
+        # Default-public grant only once every launch step has been accepted, so a
+        # rejected request never leaves a public session behind. Sub-agent
+        # children follow their parent's grants instead.
+        if user_id is not None and body.parent_session_id is None:
+            await _grant_default_public(
+                request.app.state,
+                permission_store,
+                resp.id,
+                managed=body.host_type == "managed",
+                workspace=conv.workspace if conv is not None else None,
+                host_id=launch_host_id,
+            )
         add_audit_attrs(session_id=resp.id, agent=resp.agent_id)
         return resp
 
@@ -1059,6 +1072,18 @@ def register_core_routes(
                 host_id=parsed_metadata.host_id,
                 workspace=parsed_metadata.workspace,
                 harness=canonicalize_harness(raw_harness) or raw_harness,
+            )
+        # Default-public grant only after the launch steps were accepted (see the
+        # JSON path). Sub-agent children follow their parent's grants, whether or
+        # not they inherited its runner.
+        if user_id is not None and parsed_metadata.parent_session_id is None:
+            await _grant_default_public(
+                request.app.state,
+                permission_store,
+                result.session_id,
+                managed=parsed_metadata.host_type == "managed",
+                workspace=parsed_metadata.workspace,
+                host_id=parsed_metadata.host_id,
             )
         return result
 
@@ -3514,6 +3539,18 @@ def register_core_routes(
                 user_id=user_id,
                 sandbox_provider=body.sandbox_provider,
                 workspaces=fork_workspaces,
+            )
+        # Default-public grant only after the managed launch was accepted (see
+        # the create paths). A side chat is a private scratch fork of the
+        # caller's own view.
+        if user_id is not None and not body.side_chat:
+            await _grant_default_public(
+                request.app.state,
+                permission_store,
+                new_conv.id,
+                managed=body.host_type == "managed",
+                workspace=new_conv.workspace,
+                host_id=new_conv.host_id,
             )
 
         # Bound the response like the GET-session snapshot: newest item page,
