@@ -2738,6 +2738,78 @@ async def _persist_external_conversation_items(
     return [persisted.id for persisted in persisted_items]
 
 
+def _failed_event_undelivered(event: Mapping[str, Any]) -> bool:
+    """
+    Return whether a ``response.failed`` event says the harness never received the message.
+
+    The harness sets ``undelivered`` on the error when the turn failed before
+    delivery (a launcher sign-in prompt, a missing bridge, a prompt that never
+    rendered). A failure after the harness may have accepted the message must
+    not settle anything: its own mirror can still arrive.
+    """
+    raw_response = event.get("response")
+    raw_error = raw_response.get("error") if isinstance(raw_response, dict) else None
+    if not isinstance(raw_error, dict):
+        raw_error = event.get("error")
+    return isinstance(raw_error, dict) and raw_error.get("undelivered") is True
+
+
+async def _settle_undelivered_native_input(
+    conversation_store: ConversationStore | None,
+    session_id: str,
+    response_id: str | None,
+    input_stable_id: str | None,
+) -> None:
+    """
+    Commit a failed native turn's own queued web message as a user item.
+
+    Only native-terminal sessions queue web messages: the transcript forwarder
+    normally mirrors each one back and drains its entry. When the runner
+    reports the turn failed and names the message it carried
+    (``input_stable_id``), an entry still queued under that id is a message the
+    harness never received. Left in the queue it lingers for the TTL and the
+    next mirrored message drains it instead of its own, so the transcript shows
+    the reply above a still-queued bubble and the failed message vanishes on
+    reload. Settlement is by identity, never by queue order: a turn that fails
+    after its message was mirrored (entry already drained) settles nothing, so
+    a later message still buffered in the runner keeps its own entry.
+
+    :param conversation_store: Store to append to; ``None`` skips persistence.
+    :param session_id: Session/conversation id, e.g. ``"conv_abc123"``.
+    :param response_id: The failed turn's response id, so the message groups
+        with the error item persisted right after it; ``None`` mints one.
+    :param input_stable_id: The web stable id the runner stamped on the failed
+        turn, passed only when the harness reported the failure as undelivered;
+        ``None`` settles nothing.
+    """
+    if conversation_store is None or input_stable_id is None:
+        return
+    pending_id = pending_inputs.pending_id_for_stable_id(session_id, input_stable_id)
+    if pending_id is None:
+        return
+    drained = pending_inputs.resolve(session_id, pending_id)
+    if drained is None:
+        return
+    item = NewConversationItem(
+        type="message",
+        response_id=response_id or generate_task_id(),
+        data=MessageData(role="user", content=drained.content),
+        created_by=drained.created_by,
+        stable_id=drained.stable_id,
+    )
+    try:
+        persisted = await asyncio.to_thread(conversation_store.append, session_id, [item])
+    except Exception:  # noqa: BLE001 — the error item that follows still records the failure
+        _logger.exception(
+            "Relay: could not persist the undelivered native message for session=%s",
+            session_id,
+            extra={"session_id": session_id},
+        )
+        pending_inputs.restore(session_id, drained)
+        return
+    _publish_input_consumed(session_id, persisted[0], cleared_pending_id=drained.pending_id)
+
+
 def _build_skipped_kiro_items(
     session_id: str,
     skipped_entries: list[pending_inputs.DrainedInput],
@@ -4911,6 +4983,12 @@ def _build_native_terminal_message_event(
         # which always includes it.
         "agent_id": conv.agent_id,
     }
+    # The web's stable id for this message rides along so the runner can name
+    # it on a turn that fails before the harness receives it; the relay then
+    # settles exactly that queued entry (see _settle_undelivered_native_input).
+    raw_stable_id = body.data.get("stable_id")
+    if isinstance(raw_stable_id, str) and re.fullmatch(r"[0-9a-f]{32}", raw_stable_id):
+        event["stable_id"] = raw_stable_id
     # Carry the persisted override in-band like the non-native forwards: a
     # runner whose session cache is cold (fresh process, missed init) must
     # not resolve this turn from the spec and evict the override harness.
@@ -6488,6 +6566,22 @@ async def _dispatch_session_event_to_runner_impl(
                 "omnigent on the host (>= 0.15.0) and reconnect it, then try again.",
                 code=ErrorCode.INVALID_INPUT,
             )
+        queues_message = isinstance(content, list) and bool(content) and not opens_side_chat
+        if queues_message and web_stable_id is not None:
+            repeated_pending_id = pending_inputs.pending_id_for_stable_id(
+                session_id, web_stable_id
+            )
+            if repeated_pending_id is not None:
+                # A client retry of a send the runner already received (its
+                # response was lost in flight). Forwarding it again would run
+                # the prompt twice; answer with the queued entry it already has.
+                _logger.info(
+                    "Native message %s is already queued for session=%s; not forwarding again",
+                    repeated_pending_id,
+                    session_id,
+                    extra={"session_id": session_id},
+                )
+                return _SessionEventDispatchResult(item_id=None, pending_id=repeated_pending_id)
         pending_id: str | None = (
             pending_inputs.record(
                 session_id,
@@ -6496,7 +6590,7 @@ async def _dispatch_session_event_to_runner_impl(
                 stable_id=web_stable_id,
                 background_titles_enabled=background_titles_enabled,
             )
-            if isinstance(content, list) and content and not opens_side_chat
+            if queues_message
             else None
         )
         # ── Server-side routing for native terminal sessions ────────
@@ -7101,10 +7195,18 @@ async def _relay_runner_stream_once(
                             # — the PTY idle oscillates on mid-turn lulls and
                             # would deliver a premature, lock-out completion.
                             raw_blocked_on = event.get("blocked_on")
+                            raw_response_id = event.get("response_id")
                             _publish_status(
                                 session_id,
                                 status,
                                 status_error,
+                                # The runner names the turn a failed edge closes so
+                                # the web can fold it into that turn's error card.
+                                response_id=(
+                                    raw_response_id
+                                    if isinstance(raw_response_id, str) and raw_response_id
+                                    else None
+                                ),
                                 failure_origin="relayed_runner_status",
                                 blocked_on=(
                                     raw_blocked_on
@@ -7286,6 +7388,22 @@ async def _relay_runner_stream_once(
                         if _deny_reason is not None and text_acc:
                             _llm_response_denied_turns[session_id] = _deny_reason
 
+                    if evt_type == "response.failed":
+                        # The runner could not hand this turn to a native
+                        # harness, so the web message it carried was never
+                        # mirrored back: commit it ahead of the error item.
+                        raw_input_stable_id = event.get("input_stable_id")
+                        await _settle_undelivered_native_input(
+                            conversation_store,
+                            session_id,
+                            current_response_id,
+                            (
+                                raw_input_stable_id
+                                if isinstance(raw_input_stable_id, str)
+                                and _failed_event_undelivered(event)
+                                else None
+                            ),
+                        )
                     error_item = _error_item_from_sse(
                         event,
                         response_id=current_response_id,
