@@ -1863,6 +1863,7 @@ export function AppShell() {
       conversationId,
       workspaceRoot,
       workspaceHome,
+      sessionHostId: activeSession?.hostId ?? null,
     }),
     [
       openFileViewer,
@@ -1872,6 +1873,7 @@ export function AppShell() {
       conversationId,
       workspaceRoot,
       workspaceHome,
+      activeSession?.hostId,
     ],
   );
 
