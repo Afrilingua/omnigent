@@ -10,11 +10,37 @@ name: Windows (native)
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-    paths-ignore: ['web/**', 'tests/e2e_ui/**', 'tests/browser_ui/**', 'CHANGELOG.md']
+    paths-ignore:
+      - 'web/**'
+      - 'docs/**'
+      - 'designs/**'
+      - 'CHANGELOG.md'
+      - 'tests/browser_ui/**'
+      - 'tests/e2e_ui/**'
+      - 'tests/scripts/**'
+      - 'tests/github/**'
+      - '.github/scripts/polly-review-*.py'
+      - '.github/workflows/polly-review*.yml'
+      - '.github/workflows/*.js'
+      - 'tests/e2e/**'
+      - 'tests/integration/**'
   push:
     branches:
       - main
-    paths-ignore: ['web/**', 'tests/e2e_ui/**', 'tests/browser_ui/**', 'CHANGELOG.md']
+    paths-ignore:
+      - 'web/**'
+      - 'docs/**'
+      - 'designs/**'
+      - 'CHANGELOG.md'
+      - 'tests/browser_ui/**'
+      - 'tests/e2e_ui/**'
+      - 'tests/scripts/**'
+      - 'tests/github/**'
+      - '.github/scripts/polly-review-*.py'
+      - '.github/workflows/polly-review*.yml'
+      - '.github/workflows/*.js'
+      - 'tests/e2e/**'
+      - 'tests/integration/**'
 
 permissions:
   contents: read
