@@ -7710,6 +7710,24 @@ _ROUTED_SPAWN_ALLOWED_TOOLS: tuple[str, ...] = (
     "mcp__omnigent__sys_read_inbox",
 )
 
+_CLAUDE_LAUNCH_PERMISSION_MODES = frozenset(
+    {"default", "auto", "acceptEdits", "plan", "dontAsk", "bypassPermissions"}
+)
+
+
+def _claude_launch_permission_mode(args: list[str] | None) -> str | None:
+    """Return the effective known launch mode without logging arbitrary args."""
+    from omnigent.harnesses.claude_native.bridge import (
+        _arg_value,
+        _args_request_bypass_permissions,
+    )
+
+    launch_args = tuple(args or ())
+    if _args_request_bypass_permissions(launch_args):
+        return "bypassPermissions"
+    candidate = _arg_value(launch_args, "--permission-mode")
+    return candidate if candidate in _CLAUDE_LAUNCH_PERMISSION_MODES else None
+
 
 def _routed_spawn_launch_args(
     auto_harness: bool, *, router_started: bool = True
@@ -7858,16 +7876,23 @@ async def _load_legacy_claude_launch_metadata(
         ),
         fork_carry_history=labels.get(FORK_CARRY_HISTORY_LABEL_KEY) == "1",
     )
+    permission_mode = _claude_launch_permission_mode(metadata.terminal_launch_args)
     _logger.info(
         "Claude terminal launch config fetched: session=%s status=%s effort_set=%s "
-        "model_override_set=%s launch_args_count=%d external_session_id_set=%s",
+        "model_override_set=%s launch_args_count=%d permission_mode=%s "
+        "external_session_id_set=%s",
         session_id,
         response.status_code,
         metadata.reasoning_effort is not None,
         metadata.model_override is not None,
         len(metadata.terminal_launch_args or []),
+        permission_mode,
         metadata.external_session_id is not None,
-        extra={"session_id": session_id},
+        extra=debug_event(
+            "claude_launch_config_loaded",
+            session_id=session_id,
+            **({"permission_mode": permission_mode} if permission_mode is not None else {}),
+        ),
     )
     return metadata
 
@@ -7882,16 +7907,22 @@ async def _load_claude_launch_metadata(
     if session_init is None:
         return await _load_legacy_claude_launch_metadata(server_client, session_id)
     metadata = _claude_launch_metadata_from_envelope(session_init)
+    permission_mode = _claude_launch_permission_mode(metadata.terminal_launch_args)
     _logger.info(
         "Claude terminal launch config loaded from init envelope: session=%s "
-        "effort_set=%s model_override_set=%s launch_args_count=%d "
+        "effort_set=%s model_override_set=%s launch_args_count=%d permission_mode=%s "
         "external_session_id_set=%s",
         session_id,
         metadata.reasoning_effort is not None,
         metadata.model_override is not None,
         len(metadata.terminal_launch_args or []),
+        permission_mode,
         metadata.external_session_id is not None,
-        extra={"session_id": session_id},
+        extra=debug_event(
+            "claude_launch_config_loaded",
+            session_id=session_id,
+            **({"permission_mode": permission_mode} if permission_mode is not None else {}),
+        ),
     )
     return metadata
 
