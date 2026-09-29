@@ -21,6 +21,7 @@ interface OmnigentSetup {
   getManagedServers: () => Promise<string[]>;
   getRecentServers: () => Promise<string[]>;
   forgetRecentServer?: (url: string) => Promise<string[]>;
+  getRunnerOptions?: (url: string) => Promise<{ remote?: boolean } | null>;
   checkServer?: (url: string) => Promise<{ status: "ok" | "reachable" | "unreachable" }>;
   copyText: (text: string) => Promise<unknown>;
   setServerSelectorV2?: (enabled: boolean) => Promise<unknown>;
@@ -222,6 +223,12 @@ function BridgeSetupApp() {
         : undefined,
     onInstallLog: setupBridge()?.onCliInstallLog
       ? (cb) => setupBridge()?.onCliInstallLog?.(cb) ?? (() => {})
+      : undefined,
+    // Older shells omit it → the runner step offers this laptop only.
+    getRunnerOptions: setupBridge()?.getRunnerOptions
+      ? async (url) => ({
+          remote: (await setupBridge()?.getRunnerOptions?.(url))?.remote === true,
+        })
       : undefined,
     // Only offered when the shell exposes the forget method (newer shells).
     onRemoveServer: setupBridge()?.forgetRecentServer

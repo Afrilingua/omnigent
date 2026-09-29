@@ -19,6 +19,10 @@ function makeSetup(over: Partial<ServerSelectorV2Setup> = {}): ServerSelectorV2S
   };
 }
 
+function openPresetDropdown() {
+  fireEvent.pointerDown(screen.getByRole("button", { name: /choose team url/i }), { button: 0 });
+}
+
 describe("ServerSelectorV2", () => {
   it("starts on the landing step", () => {
     render(<ServerSelectorV2 setup={makeSetup()} />);
@@ -54,16 +58,52 @@ describe("ServerSelectorV2", () => {
     expect(screen.getByRole("heading", { name: "Meet Omnigent" })).toBeInTheDocument();
   });
 
-  it("a returning MDM user (no recents — presets are excluded) starts on the preset list", () => {
+  it("a returning MDM user starts on the landing, and Join opens the preset directly", async () => {
+    const onConnect = vi.fn().mockResolvedValue({});
+    const getRunnerOptions = vi.fn().mockResolvedValue({ remote: true });
     render(
       <ServerSelectorV2
         setup={makeSetup({
+          installed: true,
           connectedBefore: true,
-          managedServers: ["https://field-eng-omni.aws.databricksapps.com"],
+          managedServers: ["https://team.example.com/"],
+          onConnect,
+          getRunnerOptions,
         })}
       />,
     );
-    expect(screen.getByText(/preset \(by your organization\)/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /join your team \(team\)/i }));
+    await waitFor(() => expect(onConnect).toHaveBeenCalledWith("https://team.example.com/"));
+    expect(getRunnerOptions).not.toHaveBeenCalled();
+  });
+
+  it("an MDM landing shows a direct connect's error, and a failed load's", async () => {
+    const onConnect = vi.fn().mockResolvedValue({ error: "rejected" });
+    const { unmount } = render(
+      <ServerSelectorV2
+        setup={makeSetup({
+          installed: true,
+          recentServers: ["https://old.example.com/"],
+          managedServers: ["https://team.example.com/"],
+          onConnect,
+        })}
+      />,
+    );
+    fireEvent.pointerDown(screen.getByRole("button", { name: /choose team url/i }), { button: 0 });
+    fireEvent.click(screen.getByRole("menuitem", { name: "old.example.com" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("rejected");
+    unmount();
+
+    render(
+      <ServerSelectorV2
+        setup={makeSetup({
+          error: "Could not load",
+          managedServers: ["https://team.example.com/"],
+        })}
+      />,
+    );
+    expect(screen.getByRole("heading", { name: "Meet Omnigent" })).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not load");
   });
 
   it("a returning user who cleared every server starts on the landing", () => {
@@ -175,69 +215,181 @@ describe("ServerSelectorV2", () => {
     expect(screen.getByText(/connecting to the local server/i)).toBeInTheDocument();
   });
 
-  it("Back from a failed start opened via 'Add server…' returns to the list, not the URL input", async () => {
+  it("a new MDM user's typed URL goes through the runner step", async () => {
+    const getRunnerOptions = vi.fn().mockResolvedValue({ remote: false });
+    render(
+      <ServerSelectorV2
+        setup={makeSetup({ managedServers: ["https://team.example.com/"], getRunnerOptions })}
+      />,
+    );
+    fireEvent.pointerDown(screen.getByRole("button", { name: /choose team url/i }), { button: 0 });
+    fireEvent.change(screen.getByLabelText("Server URL"), {
+      target: { value: "https://typed.example.com" },
+    });
+    fireEvent.keyDown(screen.getByLabelText("Server URL"), { key: "Enter" });
+    expect(
+      await screen.findByRole("heading", { name: /where do you work today/i }),
+    ).toBeInTheDocument();
+    expect(getRunnerOptions).toHaveBeenCalledWith("https://typed.example.com/");
+  });
+
+  it("picking a preset offers only this laptop when the shell reports no remote environment", async () => {
+    const getRunnerOptions = vi.fn().mockResolvedValue({ remote: false });
+    render(
+      <ServerSelectorV2
+        setup={makeSetup({ managedServers: ["https://team.example.com/"], getRunnerOptions })}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /join your team \(team\)/i }));
+    expect(
+      await screen.findByRole("heading", { name: /where do you work today/i }),
+    ).toBeInTheDocument();
+    expect(getRunnerOptions).toHaveBeenCalledWith("https://team.example.com/");
+    fireEvent.click(screen.getByRole("combobox", { name: "Runner" }));
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual(["My laptop"]);
+  });
+
+  it("a slow runner lookup can't replace a newer pick", async () => {
+    let resolveFirst: (v: { remote: boolean }) => void = () => {};
+    const getRunnerOptions = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockResolvedValue({ remote: false });
+    const onConnect = vi.fn().mockResolvedValue({});
     render(
       <ServerSelectorV2
         setup={makeSetup({
           installed: true,
-          managedServers: ["https://field-eng-omni.aws.databricksapps.com"],
-          onCheckServer: vi.fn().mockResolvedValue({ status: "unreachable" }),
-          onStartLocal: vi.fn().mockResolvedValue({ ok: false, error: "boom" }),
+          managedServers: ["https://team.example.com/"],
+          getRunnerOptions,
+          onConnect,
         })}
       />,
     );
-    fireEvent.pointerDown(screen.getByRole("button", { name: /choose team url/i }), { button: 0 });
-    fireEvent.click(screen.getByRole("menuitem", { name: /add server/i }));
-    fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "localhost:6767" } });
-    fireEvent.click(screen.getByRole("button", { name: "Join" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Start Omnigent" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Back" }));
-    expect(screen.getByText(/preset \(by your organization\)/i)).toBeInTheDocument();
-    expect(screen.queryByLabelText("Server URL")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /join your team \(team\)/i }));
+    openPresetDropdown();
+    fireEvent.change(screen.getByLabelText("Server URL"), {
+      target: { value: "https://typed.example.com" },
+    });
+    fireEvent.keyDown(screen.getByLabelText("Server URL"), { key: "Enter" });
+    const runner = await screen.findByRole("combobox", { name: "Runner" });
+    resolveFirst({ remote: true });
+    await waitFor(() => expect(getRunnerOptions).toHaveBeenCalledTimes(2));
+    expect(runner).toHaveTextContent("My laptop");
+    fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" }));
+    await waitFor(() => expect(onConnect).toHaveBeenCalledWith("https://typed.example.com/"));
   });
 
-  it("'Add server…' in the preset dropdown opens the URL input; Back returns to the landing", () => {
-    render(
-      <ServerSelectorV2
-        setup={makeSetup({ managedServers: ["https://field-eng-omni.aws.databricksapps.com"] })}
-      />,
-    );
-    fireEvent.pointerDown(screen.getByRole("button", { name: /choose team url/i }), { button: 0 });
-    fireEvent.click(screen.getByRole("menuitem", { name: /add server/i }));
-    expect(screen.getByLabelText("Server URL")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Back" }));
-    expect(screen.getByRole("heading", { name: "Meet Omnigent" })).toBeInTheDocument();
-  });
-
-  it("picking a preset server from the landing shows its detail step", () => {
-    render(
-      <ServerSelectorV2
-        setup={makeSetup({ managedServers: ["https://field-eng-omni.aws.databricksapps.com"] })}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: /join your team \(field-eng-omni\)/i }));
-    expect(screen.getByRole("heading", { name: /you.?re in/i })).toBeInTheDocument();
-    // Single server, no radio list to select from.
-    expect(screen.queryByRole("radiogroup")).not.toBeInTheDocument();
-  });
-
-  it("'Show all servers' from the preset detail reveals the full list (presets + recents)", () => {
+  it("a failed runner lookup still opens the runner step, laptop only", async () => {
     render(
       <ServerSelectorV2
         setup={makeSetup({
-          managedServers: ["https://field-eng-omni.aws.databricksapps.com"],
-          recentServers: ["https://team.example.com/"],
+          managedServers: ["https://team.example.com/"],
+          getRunnerOptions: vi.fn().mockRejectedValue(new Error("ipc down")),
         })}
       />,
     );
-    // Returning (has recents) → opens on the list; Back reaches the landing.
-    fireEvent.click(screen.getByRole("button", { name: "Back" }));
-    fireEvent.click(screen.getByRole("button", { name: /join your team \(field-eng-omni\)/i }));
-    fireEvent.click(screen.getByRole("button", { name: /show all servers/i }));
-    // Now on the full list: both sections present, so recents are reachable.
-    expect(screen.getByText(/^Recents$/)).toBeInTheDocument();
-    expect(screen.getByText(/preset \(by your organization\)/i)).toBeInTheDocument();
-    expect(screen.getByText("team.example.com")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /join your team \(team\)/i }));
+    fireEvent.click(await screen.findByRole("combobox", { name: "Runner" }));
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual(["My laptop"]);
+  });
+
+  it("the runner step shows a direct connect's error", async () => {
+    render(
+      <ServerSelectorV2
+        setup={makeSetup({
+          installed: true,
+          managedServers: ["https://team.example.com/"],
+          onConnect: vi.fn().mockResolvedValue({ error: "unreachable" }),
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /join your team \(team\)/i }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open Omnigent" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("unreachable");
+  });
+
+  it("defaults the runner to the remote environment when offered", async () => {
+    render(
+      <ServerSelectorV2
+        setup={makeSetup({
+          managedServers: ["https://team.example.com/"],
+          getRunnerOptions: vi.fn().mockResolvedValue({ remote: true }),
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /join your team \(team\)/i }));
+    const runner = await screen.findByRole("combobox", { name: "Runner" });
+    expect(runner).toHaveTextContent("Remote environment");
+    fireEvent.click(runner);
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual([
+      "Remote environment",
+      "My laptop",
+    ]);
+  });
+
+  it("the runner step connects to the preset, and Back returns to the landing", async () => {
+    const onConnect = vi.fn().mockResolvedValue({});
+    const { unmount } = render(
+      <ServerSelectorV2
+        setup={makeSetup({
+          installed: true,
+          managedServers: ["https://team.example.com/"],
+          onConnect,
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /join your team \(team\)/i }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open Omnigent" }));
+    await waitFor(() => expect(onConnect).toHaveBeenCalledWith("https://team.example.com/"));
+    unmount();
+
+    render(
+      <ServerSelectorV2 setup={makeSetup({ managedServers: ["https://team.example.com/"] })} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /join your team \(team\)/i }));
+    fireEvent.click(await screen.findByRole("button", { name: "Back" }));
+    expect(screen.getByRole("heading", { name: "Meet Omnigent" })).toBeInTheDocument();
+  });
+
+  // Whatever the shell reports, the user can always type an arbitrary server URL.
+  it.each<[string, Partial<ServerSelectorV2Setup>, () => void]>([
+    [
+      "new, no MDM",
+      {},
+      () => fireEvent.click(screen.getByRole("button", { name: /join your team/i })),
+    ],
+    ["new, MDM presets", { managedServers: ["https://team.example.com/"] }, openPresetDropdown],
+    [
+      "returning, recents",
+      { recentServers: ["https://team.example.com/"] },
+      () => fireEvent.click(screen.getByRole("button", { name: "Add server" })),
+    ],
+    [
+      "returning, MDM presets",
+      { connectedBefore: true, managedServers: ["https://team.example.com/"] },
+      openPresetDropdown,
+    ],
+    [
+      "Connect to new server…, MDM",
+      { initialStep: "server", managedServers: ["https://team.example.com/"] },
+      openPresetDropdown,
+    ],
+    [
+      "failed connect, MDM",
+      { error: "Could not load http://dead/", managedServers: ["https://team.example.com/"] },
+      openPresetDropdown,
+    ],
+    ["failed connect, no servers", { error: "Could not load http://dead/" }, () => {}],
+  ])("reaches a server URL input: %s", (_name, over, open) => {
+    render(<ServerSelectorV2 setup={makeSetup(over)} />);
+    open();
+    expect(screen.getByLabelText("Server URL")).toBeInTheDocument();
   });
 
   it("opens directly on the server step when a connect error is present", () => {
