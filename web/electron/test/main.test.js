@@ -860,14 +860,52 @@ describe("managed server preference wiring", () => {
     );
     assert.match(
       liveCode,
-      /ipcMain\.handle\("omnigent:get-runner-options"[\s\S]{0,120}!isSetupPageSender\(event\)[\s\S]{0,200}typeof url === "string" &&\s*databricksInternalFeaturesEnabled\(\) &&\s*isDatabricksManagedServerUrl\(url\) &&\s*arca\.resolveArcaPath\(\) !== null/,
+      /ipcMain\.handle\("omnigent:get-runner-options"[\s\S]{0,120}!isSetupPageSender\(event\)[\s\S]{0,200}typeof url === "string" &&\s*databricksInternalFeaturesEnabled\(\) &&\s*isDatabricksManagedServerUrl\(url\);\s*return \{ remote: internal && arca\.resolveArcaPath\(\) !== null, bundledCli: internal \}/,
+    );
+  });
+
+  it("connects the onboarding runner only for the setup page, re-checking the remote gate", () => {
+    assert.match(
+      preloadSource,
+      /connectRunner:\s*\(url, runner\)\s*=>\s*ipcRenderer\.invoke\("omnigent:connect-runner",\s*url,\s*runner\)/,
+    );
+    const start = liveCode.indexOf('ipcMain.handle("omnigent:connect-runner"');
+    const end = liveCode.indexOf('ipcMain.handle("omnigent:copy-setup-text"');
+    assert.ok(start >= 0 && end > start, "connect-runner handler not found before copy-setup-text");
+    const handler = liveCode.slice(start, end);
+    assert.match(handler, /^[\s\S]{0,120}!isSetupPageSender\(event\)/);
+    assert.match(handler, /runner !== "local" && runner !== "remote"/);
+    assert.match(handler, /typeof url !== "string"\) throw new TypeError/);
+    // Same target resolution as set-server-url; the remote run dies with the setup window.
+    assert.match(handler, /const target = await resolveConnectTarget\(url\);/);
+    assert.match(
+      handler,
+      /event\.sender\.once\("destroyed", cancel\);\s*const result = await run\.promise;\s*event\.sender\.removeListener\("destroyed", cancel\);/,
+    );
+    assert.match(
+      handler,
+      /if \(!cliCommand\) return \{ ok: false, error: missingHostCliError\(target\) \};/,
+    );
+    // Remote: the window-independent gate is re-checked in main, never trusted from the page.
+    assert.match(
+      handler,
+      /runner === "remote"[\s\S]{0,80}!databricksInternalFeaturesEnabled\(\) \|\| !isDatabricksManagedServerUrl\(target\)[\s\S]{0,200}arca\.startArcaConnect\(target/,
+    );
+    // Local: same CLI choice and sign-in-first order as the host menu's start.
+    assert.match(
+      handler,
+      /hostCliCommand\(target\)[\s\S]{0,500}serverManager\.ensureServerAuth\(cliCommand, target\)[\s\S]{0,150}serverManager\.ensureHostConnected\(cliCommand, target\)/,
     );
   });
 
   it("preserves a managed path while still expanding bare workspace roots", () => {
     assert.match(
       liveCode,
-      /managedTarget\s*\?\?\s*normalizeUrl\(url\)[\s\S]{0,120}await expandDatabricksWorkspaceUrl\(normalized,\s*\{\s*signal\s*\}\)/,
+      /function resolveConnectTarget\(url, options\)[\s\S]{0,160}expandDatabricksWorkspaceUrl\(managedTarget \?\? normalizeUrl\(url\), options\)/,
+    );
+    assert.match(
+      liveCode,
+      /ipcMain\.handle\("omnigent:set-server-url"[\s\S]{0,1200}await resolveConnectTarget\(url, \{ signal \}\)/,
     );
   });
 
