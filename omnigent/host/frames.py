@@ -564,14 +564,14 @@ class HostCreateWorktreeResultFrame:
     :param request_id: Correlates to the
         :class:`HostCreateWorktreeFrame`, e.g. ``"req_wt_1"``.
     :param status: ``"ok"`` or ``"failed"``.
-    :param worktree_path: Created worktree directory (stored as the
-        session ``workspace``), e.g.
+    :param worktree_path: Created worktree root directory, e.g.
         ``"/Users/alice/myrepo-worktrees/feature-login"``. ``None``
         on failure.
     :param branch: Branch checked out, e.g. ``"feature/login"``.
         ``None`` on failure.
     :param error: Error message when ``status`` is ``"failed"``,
         e.g. ``"not a git repository"``. ``None`` on success.
+    :param workspace: Selected directory in the new worktree. Absent on older hosts.
     """
 
     request_id: str
@@ -579,6 +579,7 @@ class HostCreateWorktreeResultFrame:
     worktree_path: str | None = None
     branch: str | None = None
     error: str | None = None
+    workspace: str | None = None
 
 
 @dataclass
@@ -633,10 +634,12 @@ class HostListWorktreesFrame:
     :param request_id: Correlates the result, e.g. ``"req_wt_ls_1"``.
     :param repo_path: Absolute path inside the repo (the picked dir or
         a subdir), e.g. ``"/Users/alice/myrepo"``.
+    :param for_cleanup: Avoid replacement symlinks in a stored canonical workspace.
     """
 
     request_id: str
     repo_path: str
+    for_cleanup: bool = False
 
 
 @dataclass
@@ -1374,6 +1377,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "worktree_path": frame.worktree_path,
                 "branch": frame.branch,
                 "error": frame.error,
+                "workspace": frame.workspace,
             }
         )
     if isinstance(frame, HostRemoveWorktreeFrame):
@@ -1401,6 +1405,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "kind": HostFrameKind.LIST_WORKTREES.value,
                 "request_id": frame.request_id,
                 "repo_path": frame.repo_path,
+                "for_cleanup": frame.for_cleanup,
             }
         )
     if isinstance(frame, HostListWorktreesResultFrame):
@@ -2225,6 +2230,7 @@ def _decode_create_worktree_result(
         worktree_path=_optional_nullable_str(msg, "worktree_path"),
         branch=_optional_nullable_str(msg, "branch"),
         error=_optional_nullable_str(msg, "error"),
+        workspace=_optional_nullable_str(msg, "workspace"),
     )
 
 
@@ -2269,6 +2275,7 @@ def _decode_list_worktrees(msg: _JsonObject) -> HostListWorktreesFrame:
     return HostListWorktreesFrame(
         request_id=_required_str(msg, "request_id"),
         repo_path=_required_str(msg, "repo_path"),
+        for_cleanup=msg.get("for_cleanup") is True,
     )
 
 
