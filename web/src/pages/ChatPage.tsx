@@ -2999,6 +2999,14 @@ function ComposerImpl(
         dirtyRef.current = true;
         setValue("");
         setCommandError(null);
+        if (sessionHarness === "claude-native") {
+          // Claude accepts /compact as input; reuse message queueing and
+          // pending bubbles until its transcript acknowledges the command.
+          const command = arg ? `/compact ${arg}` : "/compact";
+          appendEntry(command);
+          onSend(command);
+          return true;
+        }
         void useChatStore
           .getState()
           .compact()
@@ -3333,7 +3341,7 @@ function ComposerImpl(
         cmd in BUILTIN_SLASH_COMMANDS &&
         cmd in slashCommands
       ) {
-        executeSlashCommand(cmd, arg);
+        executeSlashCommand(cmd, cmd === "/compact" ? trimmed.slice(parts[0].length).trim() : arg);
         return;
       }
       // /side opens a side chat. Codex forks in-process (falls through to the
