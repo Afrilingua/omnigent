@@ -589,6 +589,10 @@ jobs:
           not automatic blockers. Cite the relevant section and concrete file/line
           evidence for each finding. Do not flag unchanged historical violations.
 
+          For routing changes, consider `host_id` sharding, including parent-host
+          inheritance and retry affinity. Report verified bugs only under **Blocking issues**
+          using the existing criteria; add no separate section or status note.
+
           **PR scope:** Review the full diff, including pre-existing changes, against
           one concrete reported problem or requested outcome. Establish that outcome
           from available linked-issue context or the PR description. A precise PR
