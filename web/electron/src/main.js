@@ -72,6 +72,7 @@ const arca = require("./arca");
 const cliInstall = require("./cli_install");
 const isaac = require("./isaac");
 const { createArcaConnectFlow } = require("./arca_connect_window");
+const { createArcaAutoConnect } = require("./arca_autoconnect");
 const { registerSessionExpiryReload } = require("./session-expiry");
 const { ensureDatabricksSession } = require("./databricks-session");
 const { expireStoredAccessToken, removeStoredRefreshToken } = require("./databricks-oauth");
@@ -307,6 +308,45 @@ const arcaConnectFlow = createArcaConnectFlow({
   log: (message) => console.log(`[omnigent] ${message}`),
 });
 
+/** How long a negative arca-binary probe is trusted before re-checking PATH. */
+const ARCA_PATH_RETRY_MS = 60 * 1000;
+let cachedArcaPath = { path: null, checkedAt: 0 };
+let arcaProbe = null;
+
+/**
+ * Refresh the cached arca binary in the background. A hit is kept for the
+ * launch; a miss is re-probed at most once a minute, since the probe spawns a
+ * shell. Concurrent callers share one probe.
+ *
+ * @returns {Promise<string | null>}
+ */
+function refreshArcaBinary() {
+  // Only auto-connect uses the cached binary; with the feature off, don't probe.
+  if (!arcaAutoConnectFeatureEnabled()) return Promise.resolve(null);
+  if (cachedArcaPath.path && arca.isExecutableFile(cachedArcaPath.path)) {
+    return Promise.resolve(cachedArcaPath.path);
+  }
+  if (Date.now() - cachedArcaPath.checkedAt < ARCA_PATH_RETRY_MS) return Promise.resolve(null);
+  arcaProbe ??= arca.resolveArcaPathAsync().then((found) => {
+    cachedArcaPath = { path: found, checkedAt: Date.now() };
+    arcaProbe = null;
+    return found;
+  });
+  return arcaProbe;
+}
+
+/**
+ * The cached arca binary, or null. Never blocks: a stale miss kicks off a
+ * background re-probe that later calls pick up.
+ *
+ * @returns {string | null}
+ */
+function cachedArcaBinary() {
+  if (cachedArcaPath.path && arca.isExecutableFile(cachedArcaPath.path)) return cachedArcaPath.path;
+  void refreshArcaBinary();
+  return null;
+}
+
 /**
  * Feature flag for Arca auto-connect, off by default: `OMNIGENT_ARCA_AUTO_CONNECT=1`
  * forces it on, otherwise settings.json `arca_auto_connect: true` enables it.
@@ -321,31 +361,25 @@ function arcaAutoConnectFeatureEnabled() {
   );
 }
 
-/** Auto-connect runs by server origin: at most one per launch, shared while running. */
-const arcaAutoConnectRuns = new Map();
-
-/**
- * When the feature flag is on, connect the user's Arca instance to a
- * Databricks-managed server once per launch, running the same idempotent
- * command as "Run on Arca" without its consent console. The remote daemon
- * then keeps its own tunnel, so nothing here outlives the run.
- *
- * @param {string} serverUrl
- */
-function autoConnectArca(serverUrl) {
-  if (!arcaAutoConnectFeatureEnabled() || !isDatabricksManagedServerUrl(serverUrl)) return;
-  const origin = originOf(serverUrl);
-  if (!origin || arcaAutoConnectRuns.has(origin)) return;
-  console.log(`[omnigent] arca auto-connect: running against ${origin}`);
-  const run = arca.startArcaConnect(serverUrl).promise.then((result) => {
-    arcaAutoConnectRuns.set(origin, null);
-    console.log(
-      `[omnigent] arca auto-connect: ${result.ok ? "online" : `failed: ${result.error}`}`,
-    );
-    return result;
-  });
-  arcaAutoConnectRuns.set(origin, run);
-}
+/** Launch-time Arca auto-connect, behind the feature flag above. */
+const arcaAutoConnect = createArcaAutoConnect({
+  // Auto-connect needs arca itself: the MDM flag alone keeps the manual item
+  // (which explains what's missing) but shouldn't fail on every launch.
+  isEligible: (serverUrl) =>
+    arcaAutoConnectFeatureEnabled() &&
+    isDatabricksManagedServerUrl(serverUrl) &&
+    cachedArcaBinary() !== null,
+  startConnect: (serverUrl, onOutput) =>
+    arca.startArcaConnect(serverUrl, { onOutput, resolveArcaPath: cachedArcaBinary }),
+  commandLine: (serverUrl) => {
+    try {
+      return `arca ${arca.buildConnectArgs(serverUrl).join(" ")}`;
+    } catch {
+      return null;
+    }
+  },
+  log: (message) => console.log(`[omnigent] ${message}`),
+});
 
 /**
  * Quit-safety timeouts (see the before-quit handler near the end of this
@@ -1526,7 +1560,7 @@ async function loadServerUrl(
     });
     await win.loadURL(target);
     assertCurrent();
-    autoConnectArca(serverUrl);
+    void refreshArcaBinary().then(() => arcaAutoConnect.ensure(serverUrl));
     return serverUrl;
   } finally {
     attempt.pending = false;
@@ -3660,10 +3694,20 @@ function registerIpc() {
     if (!isDatabricksManagedServerUrl(serverUrl)) {
       return { ok: false, error: "Arca hosts can only connect to Databricks-managed servers." };
     }
-    // An auto-connect still running shares its outcome instead of racing a
+    // An auto-connect already running shares its outcome instead of racing a
     // second `arca ssh`.
-    const autoRun = arcaAutoConnectRuns.get(originOf(serverUrl));
-    if (autoRun) return autoRun;
+    const autoRun = arcaAutoConnect.inFlight(serverUrl);
+    if (autoRun) {
+      const status = await autoRun;
+      return status.state === "online"
+        ? { ok: true, alreadyRunning: status.alreadyRunning === true }
+        : {
+            ok: false,
+            error: status.error,
+            errorKind: status.errorKind,
+            authError: status.errorKind === "omni-auth",
+          };
+    }
     const win = BrowserWindow.fromWebContents(event.sender);
     return arcaConnectFlow.run(win, serverUrl);
   });
